@@ -1,0 +1,66 @@
+# Dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+
+# Android
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/local.properties
+*.keystore
+!debug.keystore
+
+# iOS
+ios/
+
+# Metro
+.metro-health-check*
+
+# Debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Build artifacts
+*.apk
+*.aab
+*.ipa
+*.hbc
+
+# Logs
+*.log
+build_log.txt
+
+# Cache
+.cache/
+.parcel-cache/
+.yarn/cache/
+
+# Temporary
+*.tmp
+*.bak
+
+# Personal planning files (not for public)
+readme/PLANNING.md
+readme/个人计划-AI请忽略.txt
