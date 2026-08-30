@@ -132,6 +132,7 @@ export default function QueueScreen() {
         onClose={() => setMenuVisible(false)}
         title={menuTitle}
         actions={[
+          { label: '📑 添加到歌单', onPress: () => usePlayerStore.getState().openAddToPlaylist(menuTrack) },
           { label: '▶ 下一首播放', onPress: () => handlePlayNext(menuIndex) },
           { label: '🗑 从列表移除', onPress: () => handleRemove(menuIndex), destructive: true },
         ]}

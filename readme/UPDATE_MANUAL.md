@@ -72,7 +72,7 @@ defaultConfig {
 ### 步骤 2：构建 APK
 
 ```powershell
-cd D:\Qclaw_work\neon-player-mobile
+cd d:\anti_work\neon
 
 # 方式 A：EAS Build（需要 Expo 账号登录）
 eas build -p android --profile preview
@@ -264,11 +264,11 @@ App 后台请求 update.json
 
 ### 方案 C：本机局域网（开发测试）
 
-1. 在 D:\Qclaw_work\ 下创建 `update-server` 目录
+1. 在 d:\anti_work\ 下创建 `update-server` 目录
 2. 放入 update.json 和 APK 文件
 3. 用 Python 起简单 HTTP 服务：
    ```powershell
-   cd D:\Qclaw_work\update-server
+   cd d:\anti_work\update-server
    python -m http.server 3000
    ```
 4. src/services/updater.js 中的 URL 改为 `http://192.168.1.27:3000/update.json`

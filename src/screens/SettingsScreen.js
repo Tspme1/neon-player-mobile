@@ -9,7 +9,10 @@ import * as DocumentPicker from 'expo-document-picker';
 import { HEADER_PADDING_TOP } from '../theme/safearea';
 import { useTheme } from '../theme/useTheme';
 import { usePlayerStore } from '../store/useStore';
-import { loadFavorites, saveFavorites, loadSettings, saveSettings } from '../core/storage';
+import {
+  loadFavorites, saveFavorites, loadSettings, saveSettings,
+  loadCustomPlaylists, saveCustomPlaylists, parseImportData,
+} from '../core/storage';
 import { ChevronLeftIcon, TrashIcon } from '../components/icons';
 import { importFromUrl, importFromFile, deleteSource, setSourceEnabled, updateSource, loadRegistry } from '../core/source-manager';
 import { getCacheSize, clearCache } from '../core/cache-manager';
@@ -196,30 +199,34 @@ export default function SettingsScreen({ visible, onClose }) {
     }
   };
 
-  // === 导出喜欢清单 ===
+  // === 导出全部数据（喜欢清单 + 自建歌单） ===
   const handleExportFavorites = async () => {
-    if (!favorites || favorites.length === 0) {
-      setToast('喜欢清单为空');
+    const customList = await loadCustomPlaylists();
+    const favs = favorites || [];
+    if (favs.length === 0 && customList.length === 0) {
+      setToast('暂无喜欢歌曲或自建歌单');
       return;
     }
     const json = JSON.stringify({
-      type: 'neon-player-favorites',
+      type: 'neon-player-backup',
       version: 1,
       exportedAt: new Date().toISOString(),
-      count: favorites.length,
-      favorites: favorites,
+      favoritesCount: favs.length,
+      playlistsCount: customList.length,
+      favorites: favs,
+      playlists: customList,
     }, null, 2);
     try {
       await Share.share({
         message: json,
-        title: 'Neon Player 喜欢清单',
+        title: 'Neon Player 全量数据备份',
       });
     } catch (e) {
-      setToast('导出失败: ' + e.message);
+      setToast('导出失败: ' + (e.message || ''));
     }
   };
 
-  // === 导入喜欢清单 ===
+  // === 导入数据（智能兼容全量备份/单歌单/喜欢清单） ===
   const handleImportFavorites = async () => {
     try {
       const result = await DocumentPicker.getDocumentAsync({
@@ -239,46 +246,86 @@ export default function SettingsScreen({ visible, onClose }) {
           return;
         }
       }
-      let data;
-      try {
-        data = JSON.parse(content);
-      } catch {
-        setToast('文件格式错误，请选择 JSON 文件');
-        return;
-      }
-      if (!data || !data.favorites || !Array.isArray(data.favorites)) {
-        setToast('文件内容无效，不是有效的喜欢清单');
-        return;
-      }
-      Alert.alert(
-        '导入喜欢清单',
-        `检测到 ${data.favorites.length} 首歌曲，请选择导入方式：`,
-        [
-          { text: '取消', style: 'cancel' },
-          {
-            text: '合并',
-            onPress: async () => {
-              const existing = await loadFavorites();
-              const existingIds = new Set(existing.map(f => f.id));
-              const newOnes = data.favorites.filter(f => !existingIds.has(f.id));
-              const merged = [...existing, ...newOnes];
-              await saveFavorites(merged);
-              usePlayerStore.getState().setFavorites(merged);
-              setToast(`已合并导入 ${newOnes.length} 首歌曲（共 ${merged.length} 首）`);
+
+      const defaultName = file.name ? file.name.replace(/\.[^/.]+$/, '') : '导入歌单';
+      const parsed = parseImportData(content, defaultName);
+
+      if (parsed.format === 'backup') {
+        Alert.alert(
+          '恢复全量数据',
+          `检测到全量备份（${parsed.favorites.length} 首喜欢，${parsed.playlists.length} 个自建歌单），请选择：`,
+          [
+            { text: '取消', style: 'cancel' },
+            {
+              text: '合并恢复',
+              onPress: async () => {
+                const existingFavs = await loadFavorites();
+                const favIds = new Set(existingFavs.map(f => f.id));
+                const newFavs = parsed.favorites.filter(f => !favIds.has(f.id));
+                const mergedFavs = [...existingFavs, ...newFavs];
+                await saveFavorites(mergedFavs);
+                usePlayerStore.getState().setFavorites(mergedFavs);
+
+                const existingPlaylists = await loadCustomPlaylists();
+                const pIds = new Set(existingPlaylists.map(p => p.id));
+                const newPlaylists = parsed.playlists.filter(p => !pIds.has(p.id));
+                const mergedPlaylists = [...existingPlaylists, ...newPlaylists];
+                await saveCustomPlaylists(mergedPlaylists);
+                usePlayerStore.getState().setCustomPlaylists(mergedPlaylists);
+
+                setToast(`✅ 已合并恢复 ${newFavs.length} 首喜欢歌曲与 ${newPlaylists.length} 个歌单`);
+              },
             },
-          },
-          {
-            text: '替换',
-            onPress: async () => {
-              await saveFavorites(data.favorites);
-              usePlayerStore.getState().setFavorites(data.favorites);
-              setToast(`已替换为 ${data.favorites.length} 首歌曲`);
+            {
+              text: '覆盖恢复',
+              style: 'destructive',
+              onPress: async () => {
+                await saveFavorites(parsed.favorites);
+                usePlayerStore.getState().setFavorites(parsed.favorites);
+                await saveCustomPlaylists(parsed.playlists);
+                usePlayerStore.getState().setCustomPlaylists(parsed.playlists);
+                setToast(`✅ 已覆盖恢复全量数据`);
+              },
             },
-          },
-        ],
-      );
+          ]
+        );
+      } else if (parsed.format === 'single-playlist' || parsed.format === 'favorites') {
+        const pName = parsed.name || defaultName;
+        const tracks = parsed.tracks || [];
+        Alert.alert(
+          '导入歌单',
+          `检测到歌单「${pName}」（共 ${tracks.length} 首歌曲），请选择导入方式：`,
+          [
+            { text: '取消', style: 'cancel' },
+            {
+              text: '作为新歌单导入',
+              onPress: async () => {
+                const newP = usePlayerStore.getState().createPlaylist(pName);
+                if (newP) {
+                  tracks.forEach(t => {
+                    usePlayerStore.getState().addTrackToPlaylist(newP.id, t);
+                  });
+                  setToast(`✅ 已导入新歌单「${pName}」（${tracks.length}首）`);
+                }
+              },
+            },
+            {
+              text: '合并到我喜欢的',
+              onPress: async () => {
+                const existing = await loadFavorites();
+                const existingIds = new Set(existing.map(f => f.id));
+                const newOnes = tracks.filter(f => !existingIds.has(f.id));
+                const merged = [...existing, ...newOnes];
+                await saveFavorites(merged);
+                usePlayerStore.getState().setFavorites(merged);
+                setToast(`已合并导入 ${newOnes.length} 首到我喜欢`);
+              },
+            },
+          ]
+        );
+      }
     } catch (e) {
-      setToast('导入失败: ' + (e.message || '未知错误'));
+      setToast('导入失败: ' + (e.message || '格式无法识别'));
     }
   };
 
@@ -517,20 +564,20 @@ export default function SettingsScreen({ visible, onClose }) {
 
             <View style={[styles.divider, { backgroundColor: colors.border }]} />
 
-            {/* === 喜欢清单 === */}
+            {/* === 数据备份与恢复 === */}
             <View style={styles.section}>
-              <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>❤ 喜欢清单</Text>
+              <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>💾 歌单与数据备份</Text>
               <TouchableOpacity
                 style={[styles.actionBtn, { backgroundColor: colors.accent }]}
                 onPress={handleExportFavorites}
               >
-                <Text style={styles.actionBtnTextWhite}>📤 导出喜欢清单</Text>
+                <Text style={styles.actionBtnTextWhite}>📤 备份全部数据（喜欢 + 歌单）</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.actionBtn, { backgroundColor: colors.bgTertiary, borderWidth: 1, borderColor: colors.border, marginTop: 8 }]}
                 onPress={handleImportFavorites}
               >
-                <Text style={[styles.actionBtnText, { color: colors.textPrimary }]}>📥 导入喜欢清单</Text>
+                <Text style={[styles.actionBtnText, { color: colors.textPrimary }]}>📥 恢复/导入数据（歌单/全量备份）</Text>
               </TouchableOpacity>
             </View>
 

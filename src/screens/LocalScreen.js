@@ -197,6 +197,7 @@ export default function LocalScreen() {
         onClose={() => setMenuVisible(false)}
         title={menuTrack?.name || ''}
         actions={[
+          { label: '📑 添加到歌单', onPress: () => usePlayerStore.getState().openAddToPlaylist(menuTrack) },
           { label: '▶ 下一首播放', onPress: () => handlePlayNext(menuIndex) },
           { label: '🗑 删除', onPress: () => handleDelete(menuIndex), destructive: true },
         ]}

@@ -17,6 +17,7 @@ import FullPlayer from './src/components/FullPlayer';
 import Toast from './src/components/Toast';
 import LxSandbox from './src/components/LxSandbox';
 import UpdateDialog from './src/components/UpdateDialog';
+import AddToPlaylistModal from './src/components/AddToPlaylistModal';
 import { WebViewFetcher } from './src/components/WebViewFetcher';
 
 import { MusicIcon, SearchIcon, HeartIcon, CompassIcon, ListIcon } from './src/components/icons';
@@ -79,7 +80,17 @@ export default function App() {
         setFullPlayerVisible(false);
         return true;
       }
-      // 4. 主界面：5秒内按两次返回键才退出
+      // 4. 添加到歌单弹窗打开时，关闭弹窗
+      if (usePlayerStore.getState().addToPlaylistModalVisible) {
+        usePlayerStore.getState().closeAddToPlaylist();
+        return true;
+      }
+      // 5. 发现页排行榜详情打开时，返回排行榜一级界面
+      if (usePlayerStore.getState().toplistDetailData) {
+        usePlayerStore.getState().setToplistDetailData(null);
+        return true;
+      }
+      // 6. 主界面：5秒内按两次返回键才退出
       const now = Date.now();
       if (now - lastBackPressed.current < 5000) {
         return false; // 让系统处理（退出 APP）
@@ -173,6 +184,8 @@ export default function App() {
           updateInfo={updateInfo}
           onClose={() => setUpdateDialogVisible(false)}
         />
+
+        <AddToPlaylistModal />
 
         {settingsVisible && (
           <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 100 }}>

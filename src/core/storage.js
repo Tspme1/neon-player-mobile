@@ -5,6 +5,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 // === 存储键名 ===
 export const KEYS = {
   FAVORITES: '@favorites',
+  CUSTOM_PLAYLISTS: '@custom_playlists',
   PLAYLIST: '@playlist',
   SETTINGS: '@settings',
   VOLUME: '@volume',
@@ -135,10 +136,11 @@ export async function loadSettings() {
     if (!settings.playSource) settings.playSource = 'official';
     if (!settings.themeMode) settings.themeMode = 'auto';
     if (!settings.musicQuality) settings.musicQuality = 'standard';
+    if (!settings.playMode) settings.playMode = 'sequence';
     if (settings.allowMixWithOthers === undefined) settings.allowMixWithOthers = false;
     return settings;
   } catch {
-    return { currentSource: 'netease', searchSource: 'netease', playSource: 'official', themeMode: 'auto', musicQuality: 'standard', allowMixWithOthers: false };
+    return { currentSource: 'netease', searchSource: 'netease', playSource: 'official', themeMode: 'auto', musicQuality: 'standard', playMode: 'sequence', allowMixWithOthers: false };
   }
 }
 
@@ -288,6 +290,191 @@ export async function clearRoamPrefs() {
   }
 }
 
+// =====================================================================
+// Custom Playlists 自建歌单
+// =====================================================================
+
+export async function loadCustomPlaylists() {
+  try {
+    const json = await AsyncStorage.getItem(KEYS.CUSTOM_PLAYLISTS);
+    return json ? JSON.parse(json) : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveCustomPlaylists(playlists) {
+  try {
+    await AsyncStorage.setItem(KEYS.CUSTOM_PLAYLISTS, JSON.stringify(playlists));
+  } catch (e) {
+    console.error('[Storage] saveCustomPlaylists error:', e);
+  }
+}
+
+export function createPlaylistObject(name) {
+  const trimmed = name ? name.trim() : '';
+  return {
+    id: 'pl_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+    name: trimmed || '新建歌单',
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    tracks: [],
+  };
+}
+
+export function isTrackInPlaylist(playlist, track) {
+  if (!playlist || !playlist.tracks) return false;
+  const id = getFavoriteId(track);
+  const songId = track.songId || track.id;
+  if (songId) {
+    return playlist.tracks.some(t => t.id === id || (t.type === 'online' && (t.songId === songId || t.id === songId)));
+  }
+  return playlist.tracks.some(t => t.id === id || (t.type !== 'online' && t.path === track.path));
+}
+
+export function addTrackToPlaylistData(playlist, track) {
+  if (!playlist) return false;
+  if (!playlist.tracks) playlist.tracks = [];
+  if (isTrackInPlaylist(playlist, track)) return false;
+  const id = getFavoriteId(track);
+  playlist.tracks.push({
+    id: id,
+    type: track.type || 'online',
+    path: track.path || '',
+    name: track.name || '',
+    songId: track.songId || track.id || null,
+    artist: track.artist || '',
+    album: track.album || '',
+    duration: track.duration || 0,
+    fee: track.fee || 0,
+    _src: track._src || null,
+    _platform: track._platform || (track.type === 'online' ? 'netease' : undefined),
+    addedAt: Date.now(),
+  });
+  playlist.updatedAt = Date.now();
+  return true;
+}
+
+export function removeTrackFromPlaylistData(playlist, trackIdOrSongId) {
+  if (!playlist || !playlist.tracks) return;
+  const idx = playlist.tracks.findIndex(t => t.id === trackIdOrSongId || t.songId === trackIdOrSongId || t.path === trackIdOrSongId);
+  if (idx >= 0) {
+    playlist.tracks.splice(idx, 1);
+    playlist.updatedAt = Date.now();
+  }
+}
+
+/**
+ * 智能解析导入数据
+ * 支持：
+ * 1. type: 'neon-player-playlist' (单歌单)
+ * 2. type: 'neon-player-favorites' (旧版我喜欢)
+ * 3. type: 'neon-player-backup' (全量备份)
+ * 4. 洛雪歌单/通用歌曲数组 [{ name, singer/artist, ... }]
+ * 5. 纯文本逐行格式 ("歌名 - 歌手" 或 "歌名")
+ */
+export function parseImportData(rawContent, defaultName = '导入歌单') {
+  if (!rawContent || typeof rawContent !== 'string') {
+    throw new Error('导入内容为空');
+  }
+
+  const content = rawContent.trim();
+  let json = null;
+  try {
+    json = JSON.parse(content);
+  } catch {
+    json = null;
+  }
+
+  // 1. JSON 格式解析
+  if (json && typeof json === 'object') {
+    // 全量备份
+    if (json.type === 'neon-player-backup' || (json.favorites && json.playlists)) {
+      return {
+        format: 'backup',
+        favorites: Array.isArray(json.favorites) ? json.favorites : [],
+        playlists: Array.isArray(json.playlists) ? json.playlists : [],
+      };
+    }
+
+    // 单自建歌单
+    if (json.type === 'neon-player-playlist' || (json.name && Array.isArray(json.tracks))) {
+      return {
+        format: 'single-playlist',
+        name: json.name || defaultName,
+        tracks: Array.isArray(json.tracks) ? json.tracks : [],
+      };
+    }
+
+    // 喜欢清单
+    if (json.type === 'neon-player-favorites' || Array.isArray(json.favorites)) {
+      return {
+        format: 'favorites',
+        name: '我喜欢的',
+        tracks: Array.isArray(json.favorites) ? json.favorites : [],
+      };
+    }
+
+    // 歌曲数组 (如直接导出的 tracks 数组或第三方歌单数组)
+    if (Array.isArray(json)) {
+      const tracks = json.map(item => ({
+        id: item.id || (item.songId ? 'online_' + item.songId : 'online_' + Date.now() + '_' + Math.random().toString(36).slice(2, 5)),
+        type: item.type || 'online',
+        path: item.path || '',
+        name: item.name || item.title || '未知歌曲',
+        songId: item.songId || item.id || null,
+        artist: item.artist || item.singer || item.ar || '',
+        album: item.album || item.al || '',
+        duration: item.duration || 0,
+        fee: item.fee || 0,
+        _src: item._src || 'netease',
+        _platform: item._platform || 'netease',
+      }));
+      return {
+        format: 'single-playlist',
+        name: defaultName,
+        tracks,
+      };
+    }
+  }
+
+  // 2. 纯文本格式逐行解析 ("歌名 - 歌手" 或 "歌名")
+  const lines = content.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+  if (lines.length > 0) {
+    const tracks = lines.map((line, idx) => {
+      let name = line;
+      let artist = '';
+      if (line.includes(' - ')) {
+        const parts = line.split(' - ');
+        name = parts[0].trim();
+        artist = parts.slice(1).join(' - ').trim();
+      } else if (line.includes('-')) {
+        const parts = line.split('-');
+        name = parts[0].trim();
+        artist = parts.slice(1).join('-').trim();
+      }
+      return {
+        id: 'online_txt_' + Date.now() + '_' + idx,
+        type: 'online',
+        name: name || '未知歌曲',
+        artist: artist || '',
+        album: '',
+        duration: 0,
+        songId: null,
+        _src: 'netease',
+        _platform: 'netease',
+      };
+    });
+    return {
+      format: 'single-playlist',
+      name: defaultName,
+      tracks,
+    };
+  }
+
+  throw new Error('未能识别有效歌单数据');
+}
+
 export default {
   KEYS,
   loadFavorites, saveFavorites,
@@ -297,4 +484,8 @@ export default {
   loadVolume, saveVolume,
   getCachedUrl, setCachedUrl, clearUrlCache, restoreUrlCache,
   loadRoamPrefs, saveRoamPrefs, clearRoamPrefs,
+  loadCustomPlaylists, saveCustomPlaylists,
+  createPlaylistObject, isTrackInPlaylist,
+  addTrackToPlaylistData, removeTrackFromPlaylistData,
+  parseImportData,
 };

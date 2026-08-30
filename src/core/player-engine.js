@@ -16,6 +16,7 @@ import {
   loadVolume,
   saveVolume,
   loadSettings,
+  saveSettings,
   isFavorited,
   loadRoamPrefs,
   saveRoamPrefs,
@@ -110,10 +111,12 @@ async function setupAudio() {
 
 async function unloadSound() {
   if (soundObject) {
-    try {
-      await soundObject.unloadAsync();
-    } catch {}
+    const oldSound = soundObject;
     soundObject = null;
+    try {
+      oldSound.setOnPlaybackStatusUpdate(null);
+      await oldSound.unloadAsync();
+    } catch {}
   }
 }
 
@@ -131,13 +134,12 @@ function setupPlaybackStatusUpdate() {
 
         // If allowMixWithOthers and playing changed to false without user action,
         // it's an audio focus interruption from another app → resume immediately
-        if (!status.isPlaying && allowMixWithOthers && !userPaused && soundObject) {
+        // (Must NOT trigger when track naturally finishes)
+        if (!status.isPlaying && !status.didJustFinish && allowMixWithOthers && !userPaused && soundObject) {
           console.log('[PlayerEngine] Audio focus interrupted, resuming immediately');
-          // Resume immediately — use playAsync to restart playback
           soundObject.playAsync().catch(e => {
             console.error('[PlayerEngine] Auto-resume failed:', e);
           });
-          // Also try to re-acquire audio focus by setting audio mode again
           Audio.setAudioModeAsync({
             allowsRecordingIOS: false,
             staysActiveInBackground: true,
@@ -162,9 +164,10 @@ function setupPlaybackStatusUpdate() {
 
       // 自动播放下一首
       if (status.didJustFinish) {
-        if (isRoaming) {
-          setTimeout(() => playRoamNext(), 300);
-        } else if (playMode === 'repeat-one') {
+        if (soundObject) {
+          soundObject.setOnPlaybackStatusUpdate(null);
+        }
+        if (playMode === 'repeat-one') {
           if (soundObject) soundObject.replayAsync();
         } else {
           playNext();
@@ -258,22 +261,6 @@ export function getQueueSource() {
 // =====================================================================
 
 export async function togglePlay() {
-  if (isRoaming) {
-    const wasPlaying = isPlaying;
-    userPaused = wasPlaying; // track user intent
-    try {
-      if (soundObject) {
-        if (wasPlaying) await soundObject.pauseAsync();
-        else { userPaused = false; await soundObject.playAsync(); }
-      }
-    } catch (e) {
-      console.error('[PlayerEngine] togglePlay (roam) error:', e);
-    }
-    isPlaying = !wasPlaying;
-    emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying, position, duration });
-    return;
-  }
-
   if (currentIndex === -1 && playlist.length > 0) {
     await playTrack(0);
     return;
@@ -297,13 +284,14 @@ export async function togglePlay() {
 export async function playTrack(index) {
   userPaused = false;
   if (index < 0 || index >= playlist.length) return;
-  if (isRoaming) stopRoam();
+  if (isRoaming && queueSource !== 'roam') stopRoam();
 
   const track = playlist[index];
   currentIndex = index;
+  if (isRoaming) roamIndex = index;
 
   // 立即 emit TRACK_CHANGE，让 UI 即时显示新曲目信息
-  emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track, index, isPlaying: false });
+  emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track, index, isPlaying: false, isRoaming });
 
   if (track.type === 'online') {
     await playOnlineSong(track, index);
@@ -321,7 +309,7 @@ export async function playTrack(index) {
     isPlaying = true;
     currentOnlineSong = null;
     resetLyrics(); // 清空上一首歌词
-    emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track, index, isPlaying: true });
+    emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track, index, isPlaying: true, isRoaming });
     emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: true, position: 0, duration: track.duration || 0 });
   } catch (e) {
     console.error('[PlayerEngine] playTrack error:', e);
@@ -331,7 +319,7 @@ export async function playTrack(index) {
 
 export async function playOnlineSong(song, queueIndex = -1) {
   userPaused = false;
-  if (isRoaming) stopRoam();
+  if (isRoaming && queueSource !== 'roam') stopRoam();
 
   const songId = song.songId || song.id;
   if (!songId) {
@@ -347,9 +335,12 @@ export async function playOnlineSong(song, queueIndex = -1) {
 
   let targetIndex = queueIndex;
   if (targetIndex < 0) {
-    targetIndex = playlist.findIndex(t => t.type === 'online' && t.songId === songId);
+    targetIndex = playlist.findIndex(t => t.type === 'online' && (t.songId === songId || t.id === songId));
   }
-  if (targetIndex >= 0) currentIndex = targetIndex;
+  if (targetIndex >= 0) {
+    currentIndex = targetIndex;
+    if (isRoaming) roamIndex = targetIndex;
+  }
 
   // ===== [DBG] 播放链路计时 =====
   const _dbgT0 = Date.now();
@@ -408,6 +399,9 @@ export async function playOnlineSong(song, queueIndex = -1) {
       } else {
         showToast(fee === 1 || fee === 8 ? '此歌曲为 VIP 专享,无法播放' : '无法获取歌曲链接');
         _dbgLog('ABORT: no url');
+      }
+      if (queueSource === 'roam' || isRoaming) {
+        setTimeout(() => playNext(), 600);
       }
       return;
   }
@@ -486,7 +480,12 @@ export async function playOnlineSong(song, queueIndex = -1) {
     isPlaying = true;
     currentOnlineSong = { id: songId, name: song.name, artist: song.artist };
 
-    emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track: song, index: targetIndex, isPlaying: true });
+    // 记录漫游偏好（如果当前是漫游模式）
+    if (queueSource === 'roam' || isRoaming) {
+      recordRoamPref(song);
+    }
+
+    emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track: song, index: targetIndex, isPlaying: true, isRoaming: isRoaming || queueSource === 'roam' });
     emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: true, position: 0, duration: song.duration || 0 });
 
     // Fetch lyrics
@@ -507,10 +506,6 @@ export async function playOnlineSong(song, queueIndex = -1) {
 
 export async function playPrevious() {
   userPaused = false;
-  if (isRoaming) {
-    if (roamIndex > 0) await playRoamSong(roamIndex - 1);
-    return;
-  }
   if (playlist.length === 0) return;
   let prev;
   if (playMode === 'shuffle') {
@@ -523,10 +518,6 @@ export async function playPrevious() {
 
 export async function playNext() {
   userPaused = false;
-  if (isRoaming) {
-    playRoamNext();
-    return;
-  }
   if (playlist.length === 0) return;
   let next;
   if (playMode === 'shuffle') {
@@ -534,7 +525,15 @@ export async function playNext() {
       next = Math.floor(Math.random() * playlist.length);
     } while (next === currentIndex && playlist.length > 1);
   } else {
-    next = (currentIndex + 1) % playlist.length;
+    next = currentIndex + 1;
+    if (next >= playlist.length) {
+      if (queueSource === 'roam' || isRoaming) {
+        // 漫游播完一轮，自动拉取新一轮漫游歌曲
+        await startRoam();
+        return;
+      }
+      next = 0; // 顺序播放循环
+    }
   }
   await playTrack(next);
 }
@@ -545,6 +544,10 @@ export function cyclePlayMode() {
   const currentIdx = modes.indexOf(playMode);
   playMode = modes[(currentIdx + 1) % modes.length];
   showToast(labels[playMode]);
+  loadSettings().then(settings => {
+    settings.playMode = playMode;
+    saveSettings(settings);
+  }).catch(() => {});
   return playMode;
 }
 
@@ -562,11 +565,20 @@ export function setPlayMode(mode) {
 
 export async function startRoam() {
   showToast('加载漫游歌曲...');
-  const songs = await neteaseShuffleSongs();
-  if (songs.length === 0) {
+  const rawSongs = await neteaseShuffleSongs();
+  if (!rawSongs || rawSongs.length === 0) {
     showToast('无法获取漫游歌曲,请稍后重试');
     return;
   }
+
+  // 标准化歌曲对象字段
+  const songs = rawSongs.map(s => ({
+    ...s,
+    songId: s.id,
+    _platform: 'netease',
+    _src: 'netease',
+    type: 'online',
+  }));
 
   // 根据偏好排序漫游歌曲
   try {
@@ -595,24 +607,26 @@ export async function startRoam() {
     roamPlaylist = songs;
   }
 
-  roamIndex = 0;
   isRoaming = true;
-  emit(EVENTS.PLAYBACK_QUEUE_CHANGE, {
-    playlist: roamPlaylist,
-    currentIndex: 0,
-    queueSource: 'roam',
-  });
-  await playRoamSong(0);
+  roamIndex = 0;
+  setQueue('roam', roamPlaylist, 0);
+  await playTrack(0);
 }
 
 export function stopRoam() {
   isRoaming = false;
+  if (queueSource === 'roam') {
+    queueSource = null;
+    playlist = [];
+    currentIndex = -1;
+  }
   roamPlaylist = [];
   roamIndex = -1;
   currentOnlineSong = null;
   isPlaying = false;
   unloadSound();
   emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position: 0, duration: 0 });
+  emit(EVENTS.PLAYBACK_QUEUE_CHANGE, { playlist: [], currentIndex: -1, queueSource: null });
 }
 
 export async function resetRoamPrefs() {
@@ -641,116 +655,25 @@ async function recordRoamPref(song) {
 }
 
 export async function playRoamSong(index) {
-  userPaused = false;
-  if (index < 0 || index >= roamPlaylist.length) return;
-  const song = roamPlaylist[index];
+  if (index < 0 || index >= playlist.length) return;
   roamIndex = index;
-  isPlaying = false;
-  resetLyrics(); // 清空上一首歌词
-
-  // 立即 emit TRACK_CHANGE，让 UI 即时显示新曲目信息
-  emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track: song, index, isPlaying: false, isRoaming: true });
-
-  emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position: 0, duration: 0 });
-  await unloadSound();
-
-  const cacheKey = `netease_${song.id}`;
-  let songUrlData = getCachedUrl(cacheKey);
-
-  if (!songUrlData && (await getCachedFile('netease', song.id))) {
-    // 有文件缓存，走 URL 拉取（无 toast）
-  } else if (!songUrlData) {
-    showToast('正在获取歌曲链接...');
-  }
-
-  if (!songUrlData) {
-    songUrlData = await neteaseSongUrl(song.id);
-    if (!songUrlData || !songUrlData.url) {
-      showToast('无法获取歌曲链接,自动跳到下一首');
-      playRoamNext();
-      return;
-    }
-    setCachedUrl(cacheKey, songUrlData);
-  }
-
-  // 检查在此期间是否有其他播放请求介入
-  if (roamIndex !== index) return;
-
-  try {
-    soundObject = new Audio.Sound();
-
-    let playUri = songUrlData.url;
-    let usedFileCache = false;
-    if (!songUrlData.isLocal) {
-      const cachedPath = await getCachedFile('netease', song.id);
-      if (cachedPath) {
-        playUri = cachedPath;
-        usedFileCache = true;
-      }
-    }
-    const uri = songUrlData.isLocal
-      ? 'file:///' + songUrlData.url.replace(/\\/g, '/')
-      : playUri;
-
-    try {
-      await soundObject.loadAsync({ uri });
-    } catch (loadErr) {
-      if (usedFileCache) {
-        await deleteCachedFile('netease', song.id);
-        await soundObject.unloadAsync();
-        soundObject = new Audio.Sound();
-        await soundObject.loadAsync({ uri: songUrlData.url });
-      } else {
-        throw loadErr;
-      }
-    }
-
-    await soundObject.setVolumeAsync(volume);
-    setupPlaybackStatusUpdate();
-    await soundObject.playAsync();
-
-    isPlaying = true;
-    currentOnlineSong = { id: song.id, name: song.name, artist: song.artist };
-
-    // 记录漫游偏好
-    recordRoamPref(song);
-
-    emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track: song, index, isPlaying: true, isRoaming: true });
-    emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: true, position: 0, duration: song.duration || 0 });
-    emit(EVENTS.PLAYBACK_QUEUE_CHANGE, { playlist: roamPlaylist, currentIndex: index, queueSource: 'roam' });
-
-    // Fetch lyrics
-    fetchLyrics(song.id);
-
-    // 后台异步缓存
-    if (!songUrlData.isLocal) {
-      downloadAndCache('netease', song.id, songUrlData.url).catch(() => {});
-    }
-  } catch (e) {
-    console.error('[PlayerEngine] playRoamSong error:', e);
-    showToast('播放失败');
-  }
+  await playTrack(index);
 }
 
 export function playRoamNext() {
-  const next = roamIndex + 1;
-  if (next >= roamPlaylist.length) {
-    startRoam();
-    return;
-  }
-  playRoamSong(next);
+  playNext();
 }
 
 export function getIsRoaming() {
-  return isRoaming;
+  return isRoaming || queueSource === 'roam';
 }
 
 export function getRoamPlaylist() {
-  return roamPlaylist;
+  return (isRoaming || queueSource === 'roam') ? playlist : roamPlaylist;
 }
 
 export function getRoamIndex() {
-  return roamIndex;
+  return (isRoaming || queueSource === 'roam') ? currentIndex : roamIndex;
 }
 
 // =====================================================================
@@ -844,9 +767,11 @@ export function initPlayerEngine() {
         isPlaying = false;
         emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position: 0, duration: 0 });
         break;
-      case 'favorite':
-        emit(EVENTS.FAVORITE_TOGGLE, { track: playlist[currentIndex] });
+      case 'favorite': {
+        const track = isRoaming ? roamPlaylist[roamIndex] : playlist[currentIndex];
+        if (track) emit(EVENTS.FAVORITE_TOGGLE, { track });
         break;
+      }
     }
   });
 }

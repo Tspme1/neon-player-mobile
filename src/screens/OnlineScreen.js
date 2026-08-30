@@ -502,6 +502,7 @@ export default function OnlineScreen() {
         x={menuPos.x}
         y={menuPos.y}
         actions={[
+          { label: '📑 添加到歌单', onPress: () => usePlayerStore.getState().openAddToPlaylist(menuTrack) },
           { label: '⬇ 下载', onPress: () => handleDownload(menuTrack) },
           { label: '▶ 下一首播放', onPress: () => handlePlayNext(menuTrack, menuIndex) },
           { label: '📂 打开下载路径', onPress: () => handleOpenDownloadDir() },

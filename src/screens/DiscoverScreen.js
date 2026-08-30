@@ -1,6 +1,5 @@
-// 发现音乐页 — 包含排行榜、热榜、漫游三个子 tab
 import React, { useState, useEffect } from 'react';
-import { View, Text, FlatList, TouchableOpacity, StyleSheet, ScrollView, Image, Dimensions, Linking } from 'react-native';
+import { View, Text, FlatList, TouchableOpacity, StyleSheet, ScrollView, Image, Dimensions, Linking, BackHandler } from 'react-native';
 const SCREEN_W = Dimensions.get('window').width;
 const SCREEN_H = Dimensions.get('window').height;
 import * as FileSystem from 'expo-file-system/legacy';
@@ -31,23 +30,28 @@ export default function DiscoverScreen() {
   const [menuTrack, setMenuTrack] = useState(null);
   const [menuIndex, setMenuIndex] = useState(-1);
   const [menuPos, setMenuPos] = useState({ x: 0, y: 0 });
-  // 从全局 store 初始化，避免每次切回发现页都重新请求、重置状态
-  const [toplistData, setToplistData] = useState(usePlayerStore.getState().toplistData);
-  const [toplistDetail, setToplistDetail] = useState(usePlayerStore.getState().toplistDetailData || null); // { name, songs }
-  const [hotData, setHotData] = useState(usePlayerStore.getState().hotData);
-  const [subTab, setSubTabState] = useState(usePlayerStore.getState().discoverSubTab);
 
   const {
+    toplistData, setToplistData,
+    toplistDetailData: toplistDetail, setToplistDetailData,
+    hotData, setHotData,
+    discoverSubTab: subTab, setDiscoverSubTab: setSubTab,
     setQueue, playOnlineSong, favorites, setFavorites, setToast,
     isRoaming, roamIndex, roamPlaylist, startRoam, stopRoam,
-    setToplistDetailData, setDiscoverSubTab,
   } = usePlayerStore();
 
-  // 包装设置函数，同步到 store
-  const setSubTab = (tab) => {
-    setSubTabState(tab);
-    setDiscoverSubTab(tab);
-  };
+  const setToplistDetail = (detail) => setToplistDetailData(detail);
+
+  // 监听 Android 返回键：在排行榜详情中按返回键，直接回到排行榜一级页面
+  useEffect(() => {
+    if (!toplistDetail) return;
+    const onBackPress = () => {
+      setToplistDetail(null);
+      return true;
+    };
+    const sub = BackHandler.addEventListener('hardwareBackPress', onBackPress);
+    return () => sub.remove();
+  }, [toplistDetail]);
 
   // Load toplist on mount (only first time when empty)
   useEffect(() => {
@@ -67,7 +71,6 @@ export default function DiscoverScreen() {
     setLoading(true);
     const data = await neteaseToplist();
     setToplistData(data);
-    usePlayerStore.getState().setToplistData(data);
     setLoading(false);
   };
 
@@ -76,7 +79,6 @@ export default function DiscoverScreen() {
     const songs = await neteaseToplistDetail(item.id);
     const detail = { name: item.name, songs };
     setToplistDetail(detail);
-    setToplistDetailData(detail);
     setLoading(false);
   };
 
@@ -200,8 +202,13 @@ export default function DiscoverScreen() {
     return (
       <View style={{ flex: 1 }}>
         <View style={[styles.detailHeader, { borderColor: colors.border }]}>
-          <TouchableOpacity onPress={() => { setToplistDetail(null); setToplistDetailData(null); }} style={styles.backBtn}>
-            <ChevronLeftIcon width={20} height={20} color={colors.textPrimary} />
+          <TouchableOpacity
+            onPress={() => setToplistDetail(null)}
+            style={styles.backBtn}
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            activeOpacity={0.6}
+          >
+            <ChevronLeftIcon width={22} height={22} color={colors.textPrimary} />
           </TouchableOpacity>
           <Text style={[styles.detailTitle, { color: colors.textPrimary }]}>{name}</Text>
         </View>
@@ -383,6 +390,7 @@ export default function DiscoverScreen() {
         x={menuPos.x}
         y={menuPos.y}
         actions={[
+          { label: '📑 添加到歌单', onPress: () => usePlayerStore.getState().openAddToPlaylist(menuTrack) },
           { label: '⬇ 下载', onPress: () => handleDownload(menuTrack) },
           { label: '▶ 下一首播放', onPress: () => handlePlayNext(menuTrack, menuIndex) },
           { label: '📂 打开下载路径', onPress: () => handleOpenDownloadDir() },

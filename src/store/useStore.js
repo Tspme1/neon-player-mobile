@@ -9,6 +9,8 @@ import * as SourceManager from '../core/source-manager';
 import {
   loadFavorites, saveFavorites, toggleFavorite, isFavorited,
   loadSettings, saveSettings, loadPlaylist, savePlaylist,
+  loadCustomPlaylists, saveCustomPlaylists, createPlaylistObject,
+  addTrackToPlaylistData, removeTrackFromPlaylistData, isTrackInPlaylist,
   clearUrlCache,
 } from '../core/storage';
 import { getCacheSize, clearCache } from '../core/cache-manager';
@@ -39,8 +41,12 @@ export const usePlayerStore = create((set, get) => ({
   lyricsData: [],
   currentLyricIndex: -1,
 
-  // === 收藏 ===
+  // === 收藏与歌单 ===
   favorites: [],
+  customPlaylists: [],
+  currentPlaylistId: 'favorites', // 'favorites' 或 自建歌单 id
+  addToPlaylistModalVisible: false,
+  trackToAdd: null,
 
   // === 本地音乐 ===
   localLibrary: [],
@@ -94,6 +100,107 @@ export const usePlayerStore = create((set, get) => ({
     PlayerEngine.setFavorites(favs);
     MediaSession.setFavoritesRef(favs);
     saveFavorites(favs);
+  },
+
+  // === 自建歌单 Actions ===
+  setCustomPlaylists(playlists) {
+    set({ customPlaylists: playlists });
+    saveCustomPlaylists(playlists);
+  },
+
+  setCurrentPlaylistId(id) {
+    set({ currentPlaylistId: id || 'favorites' });
+  },
+
+  createPlaylist(name) {
+    const newPlaylist = createPlaylistObject(name);
+    const updated = [newPlaylist, ...get().customPlaylists];
+    set({ customPlaylists: updated, currentPlaylistId: newPlaylist.id });
+    saveCustomPlaylists(updated);
+    get().setToast(`已创建歌单「${newPlaylist.name}」`);
+    return newPlaylist;
+  },
+
+  deletePlaylist(playlistId) {
+    const list = get().customPlaylists;
+    const target = list.find(p => p.id === playlistId);
+    const updated = list.filter(p => p.id !== playlistId);
+    const currentId = get().currentPlaylistId;
+    const nextCurrentId = currentId === playlistId ? 'favorites' : currentId;
+    set({ customPlaylists: updated, currentPlaylistId: nextCurrentId });
+    saveCustomPlaylists(updated);
+    if (target) {
+      get().setToast(`已删除歌单「${target.name}」`);
+    }
+  },
+
+  renamePlaylist(playlistId, newName) {
+    const trimmed = (newName || '').trim();
+    if (!trimmed) return;
+    const updated = get().customPlaylists.map(p => {
+      if (p.id === playlistId) {
+        return { ...p, name: trimmed, updatedAt: Date.now() };
+      }
+      return p;
+    });
+    set({ customPlaylists: updated });
+    saveCustomPlaylists(updated);
+    get().setToast(`歌单已重命名为「${trimmed}」`);
+  },
+
+  addTrackToPlaylist(playlistId, track) {
+    if (playlistId === 'favorites') {
+      const favs = [...get().favorites];
+      const added = toggleFavorite(track, favs);
+      get().setFavorites(added);
+      get().setToast(isFavorited(track, added) ? '已加入我喜欢' : '已从我喜欢移除');
+      return true;
+    }
+
+    const list = [...get().customPlaylists];
+    const target = list.find(p => p.id === playlistId);
+    if (!target) return false;
+
+    const added = addTrackToPlaylistData(target, track);
+    if (added) {
+      set({ customPlaylists: list });
+      saveCustomPlaylists(list);
+      get().setToast(`已添加到「${target.name}」`);
+      return true;
+    } else {
+      get().setToast(`歌曲已在「${target.name}」中`);
+      return false;
+    }
+  },
+
+  removeTrackFromPlaylist(playlistId, trackIdOrSongId) {
+    if (playlistId === 'favorites') {
+      const favs = [...get().favorites];
+      const idx = favs.findIndex(f => f.id === trackIdOrSongId || f.songId === trackIdOrSongId || f.path === trackIdOrSongId);
+      if (idx >= 0) {
+        favs.splice(idx, 1);
+        get().setFavorites(favs);
+        get().setToast('已从我喜欢移除');
+      }
+      return;
+    }
+
+    const list = [...get().customPlaylists];
+    const target = list.find(p => p.id === playlistId);
+    if (!target) return;
+
+    removeTrackFromPlaylistData(target, trackIdOrSongId);
+    set({ customPlaylists: list });
+    saveCustomPlaylists(list);
+    get().setToast('已从歌单移除');
+  },
+
+  openAddToPlaylist(track) {
+    set({ trackToAdd: track, addToPlaylistModalVisible: true });
+  },
+
+  closeAddToPlaylist() {
+    set({ addToPlaylistModalVisible: false, trackToAdd: null });
   },
 
   setLocalLibrary(library) {
@@ -236,6 +343,10 @@ export const usePlayerStore = create((set, get) => ({
   cyclePlayMode() {
     const mode = PlayerEngine.cyclePlayMode();
     set({ playMode: mode });
+    loadSettings().then(settings => {
+      settings.playMode = mode;
+      saveSettings(settings);
+    }).catch(() => {});
     return mode;
   },
 
@@ -334,6 +445,9 @@ export function initStore() {
         isRoaming: true,
         roamPlaylist: data.playlist,
         roamIndex: data.currentIndex,
+        playlist: data.playlist,
+        currentIndex: data.currentIndex,
+        queueSource: 'roam',
       });
     } else {
       usePlayerStore.setState({
@@ -390,14 +504,16 @@ export async function initApp() {
     usePlayerStore.getState().setToast(msg);
   });
 
-  // 4-5-9. 并行加载收藏、设置、播放列表（无依赖关系）
-  const [favs, settings, savedPlaylist] = await Promise.all([
+  // 4-5-9. 并行加载收藏、自建歌单、设置、播放列表（无依赖关系）
+  const [favs, customPlaylists, settings, savedPlaylist] = await Promise.all([
     loadFavorites(),
+    loadCustomPlaylists(),
     loadSettings(),
     loadPlaylist(),
   ]);
 
   usePlayerStore.getState().setFavorites(favs);
+  usePlayerStore.setState({ customPlaylists });
   const src = settings.currentSource || settings.searchSource || 'netease';
   const searchSrc = settings.searchSource || src;
   const playSrc = settings.playSource || (src.startsWith('lx:') ? src : 'official');
@@ -407,9 +523,11 @@ export async function initApp() {
     playSource: playSrc,
     themeMode: settings.themeMode || 'auto',
     musicQuality: settings.musicQuality || 'standard',
+    playMode: settings.playMode || 'sequence',
     allowMixWithOthers: settings.allowMixWithOthers || false,
   });
   PlayerEngine.setCurrentSource(src);
+  PlayerEngine.setPlayMode(settings.playMode || 'sequence');
   PlayerEngine.setAllowMixWithOthers(settings.allowMixWithOthers || false);
 
   // 5.5 预初始化 LX 沙箱（如果播放音源是 LX）
