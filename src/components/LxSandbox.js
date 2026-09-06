@@ -27,17 +27,17 @@ export default function LxSandbox() {
       style={{
         width: 1,
         height: 1,
-        opacity: 0,
+        opacity: 0.01,
       }}
       containerStyle={{
-        width: 0,
-        height: 0,
+        width: 1,
+        height: 1,
         position: 'absolute',
-        top: 0,
-        left: 0,
-        opacity: 0,
-        flex: 0,
+        top: -100,
+        left: -100,
+        opacity: 0.01,
       }}
+      androidLayerType="hardware"
       onMessage={handleWebViewMessage}
       javaScriptEnabled={true}
       domStorageEnabled={true}

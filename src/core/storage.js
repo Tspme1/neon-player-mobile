@@ -337,9 +337,10 @@ export function addTrackToPlaylistData(playlist, track) {
   if (!playlist.tracks) playlist.tracks = [];
   if (isTrackInPlaylist(playlist, track)) return false;
   const id = getFavoriteId(track);
+  const trackType = track.type || (track.path && (!track.songId || String(track.songId).startsWith('local_')) ? 'local' : 'online');
   playlist.tracks.push({
     id: id,
-    type: track.type || 'online',
+    type: trackType,
     path: track.path || '',
     name: track.name || '',
     songId: track.songId || track.id || null,
@@ -348,7 +349,7 @@ export function addTrackToPlaylistData(playlist, track) {
     duration: track.duration || 0,
     fee: track.fee || 0,
     _src: track._src || null,
-    _platform: track._platform || (track.type === 'online' ? 'netease' : undefined),
+    _platform: track._platform || (trackType === 'online' ? 'netease' : undefined),
     addedAt: Date.now(),
   });
   playlist.updatedAt = Date.now();

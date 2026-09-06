@@ -16,6 +16,7 @@ import { usePlayerStore } from '../store/useStore';
 import { isFavorited as checkFavorited, toggleFavorite as toggleFav, loadSettings } from '../core/storage';
 import { formatTime } from '../utils/format';
 import { musicSongUrl } from '../core/source-manager';
+import { getCurrentVersionName } from '../core/updater';
 
 const { height: SCREEN_HEIGHT, width: SCREEN_WIDTH } = Dimensions.get('window');
 const COVER_SIZE = Math.min(SCREEN_WIDTH * 0.5, SCREEN_HEIGHT * 0.28);
@@ -47,22 +48,145 @@ export default function FullPlayer({ visible, onClose, onQueuePress }) {
     }
   }, [visible]);
 
-  const LYRIC_LINE_HEIGHT = 32;
-  const LYRIC_TRANSLATION_HEIGHT = 20;
+  // === 歌词行高度动态测量与锁定正中 + 手动拖拽跳转 ===
+  const lineLayouts = useRef([]);
+  const isManualScrollingRef = useRef(false);
+  const returnTimerRef = useRef(null);
+  const [showJumpControl, setShowJumpControl] = useState(false);
+  const [focusedLyricIndex, setFocusedLyricIndex] = useState(-1);
+  const currentLyricIndexRef = useRef(currentLyricIndex);
+  currentLyricIndexRef.current = currentLyricIndex;
 
+  // 切歌或歌词改变时重置测量布局与滚动交互状态
   useEffect(() => {
-    if (lyricsData.length > 0 && currentLyricIndex >= 0 && lyricsScrollRef.current) {
-      let yOffset = 0;
-      for (let i = 0; i < currentLyricIndex; i++) {
-        yOffset += LYRIC_LINE_HEIGHT;
-        if (lyricsData[i] && lyricsData[i].translation) {
-          yOffset += LYRIC_TRANSLATION_HEIGHT;
+    lineLayouts.current = [];
+    if (returnTimerRef.current) {
+      clearTimeout(returnTimerRef.current);
+      returnTimerRef.current = null;
+    }
+    isManualScrollingRef.current = false;
+    setShowJumpControl(false);
+    setFocusedLyricIndex(-1);
+  }, [lyricsData]);
+
+  // 组件卸载时清理倒计时定时器
+  useEffect(() => {
+    return () => {
+      if (returnTimerRef.current) {
+        clearTimeout(returnTimerRef.current);
+      }
+    };
+  }, []);
+
+  // 将指定索引的歌词行垂直绝对锁定在正中间
+  const scrollToLyric = useCallback((index, animated = true) => {
+    if (!lyricsScrollRef.current || index < 0 || scrollAreaHeight <= 0) return;
+    const layout = lineLayouts.current[index];
+    if (layout) {
+      // 准确居中：歌词行的垂直中心点对齐到可见视口的垂直中心 (scrollAreaHeight / 2)
+      const lineMidY = layout.y + layout.height / 2;
+      const targetY = lineMidY - scrollAreaHeight / 2;
+      lyricsScrollRef.current.scrollTo({ y: Math.max(0, targetY), animated });
+    } else {
+      // 降级估算（初次挂载尚未收集到 onLayout 时）
+      let estimatedY = 0;
+      for (let i = 0; i < index; i++) {
+        const item = lineLayouts.current[i];
+        estimatedY += item ? item.height : (lyricsData[i]?.translation ? 56 : 36);
+      }
+      const itemH = lyricsData[index]?.translation ? 56 : 36;
+      const targetY = (estimatedY + itemH / 2) - scrollAreaHeight / 2;
+      lyricsScrollRef.current.scrollTo({ y: Math.max(0, targetY), animated });
+    }
+  }, [scrollAreaHeight, lyricsData]);
+
+  // 正常播放时：自动锁定在中间滚动（手动拖拽交互期间不打扰用户）
+  useEffect(() => {
+    if (lyricsData.length > 0 && currentLyricIndex >= 0 && !isManualScrollingRef.current) {
+      scrollToLyric(currentLyricIndex, true);
+    }
+  }, [currentLyricIndex, scrollToLyric, lyricsData]);
+
+  // 松手后启动 3 秒无操作回位倒计时：超过时间平滑回到当前播放处台词
+  const startReturnCountdown = useCallback(() => {
+    if (returnTimerRef.current) clearTimeout(returnTimerRef.current);
+    returnTimerRef.current = setTimeout(() => {
+      isManualScrollingRef.current = false;
+      setShowJumpControl(false);
+      setFocusedLyricIndex(-1);
+      scrollToLyric(currentLyricIndexRef.current, true);
+    }, 3000);
+  }, [scrollToLyric]);
+
+  // 手动滚动时，实时计算哪一行最接近视口正中间
+  const handleLyricsScroll = useCallback((e) => {
+    if (!isManualScrollingRef.current) return;
+    const scrollY = e.nativeEvent.contentOffset.y;
+    const centerTargetY = scrollY + scrollAreaHeight / 2;
+
+    let closestIndex = 0;
+    let minDistance = Infinity;
+
+    for (let i = 0; i < lyricsData.length; i++) {
+      const layout = lineLayouts.current[i];
+      if (layout) {
+        const lineMid = layout.y + layout.height / 2;
+        const dist = Math.abs(lineMid - centerTargetY);
+        if (dist < minDistance) {
+          minDistance = dist;
+          closestIndex = i;
         }
       }
-      yOffset = Math.max(0, yOffset - scrollAreaHeight / 3);
-      lyricsScrollRef.current.scrollTo({ y: yOffset, animated: true });
     }
-  }, [currentLyricIndex, scrollAreaHeight, lyricsData]);
+    setFocusedLyricIndex(closestIndex);
+  }, [scrollAreaHeight, lyricsData]);
+
+  // 用户按下并开始拖拽歌词
+  const handleScrollBeginDrag = useCallback(() => {
+    isManualScrollingRef.current = true;
+    setShowJumpControl(true);
+    if (returnTimerRef.current) {
+      clearTimeout(returnTimerRef.current);
+      returnTimerRef.current = null;
+    }
+  }, []);
+
+  // 用户手指离开屏幕
+  const handleScrollEndDrag = useCallback(() => {
+    startReturnCountdown();
+  }, [startReturnCountdown]);
+
+  // 惯性滚动开始
+  const handleMomentumScrollBegin = useCallback(() => {
+    if (returnTimerRef.current) {
+      clearTimeout(returnTimerRef.current);
+      returnTimerRef.current = null;
+    }
+  }, []);
+
+  // 惯性滚动结束
+  const handleMomentumScrollEnd = useCallback(() => {
+    startReturnCountdown();
+  }, [startReturnCountdown]);
+
+  // 点击右侧播放按钮跳转进度
+  const handleJumpToLyric = useCallback(() => {
+    if (returnTimerRef.current) {
+      clearTimeout(returnTimerRef.current);
+      returnTimerRef.current = null;
+    }
+    if (focusedLyricIndex >= 0 && focusedLyricIndex < lyricsData.length) {
+      const targetLyric = lyricsData[focusedLyricIndex];
+      if (targetLyric && typeof targetLyric.time === 'number') {
+        seekTo(Math.floor(targetLyric.time * 1000));
+      }
+      const targetIdx = focusedLyricIndex;
+      isManualScrollingRef.current = false;
+      setShowJumpControl(false);
+      setFocusedLyricIndex(-1);
+      scrollToLyric(targetIdx, true);
+    }
+  }, [focusedLyricIndex, lyricsData, seekTo, scrollToLyric]);
 
   let track = null;
   if (isRoaming && roamIndex >= 0 && roamIndex < roamPlaylist.length) {
@@ -208,7 +332,17 @@ export default function FullPlayer({ visible, onClose, onQueuePress }) {
         const urlData = await musicSongUrl(playSource, { ...track, songId, _platform: platform }, track);
         if (urlData && urlData.url) shareUrl = urlData.url;
       }
-      const versionName = require('../../app.json').version || '1.00.009';
+      let versionName = '';
+      try {
+        versionName = await getCurrentVersionName();
+      } catch {}
+      if (!versionName || versionName === '1.00.000') {
+        const appJson = require('../../app.json');
+        const pkgJson = require('../../package.json');
+        versionName = appJson?.expo?.version || pkgJson?.version || '1.00.011';
+      }
+      // 严格去除开头的 v 或 V，确保没有 v 开头
+      versionName = String(versionName).replace(/^[vV]/, '').trim();
       const downloadUrl = 'https://gitee.com/tang-shupeng/neon-release/releases/download/' + versionName + '/neon-player-' + versionName + '.apk';
       const message =
         '\uD83C\uDFB5 ' + track.name + (track.artist ? ' - ' + track.artist : '') + '\n\n' +
@@ -371,29 +505,73 @@ export default function FullPlayer({ visible, onClose, onQueuePress }) {
       {/* Lyrics */}
       <View style={styles.lyricsArea}>
         {lyricsData.length > 0 ? (
-          <ScrollView
-            ref={lyricsScrollRef}
-            style={styles.lyricsScroll}
-            contentContainerStyle={styles.lyricsContent}
-            onLayout={(e) => setScrollAreaHeight(e.nativeEvent.layout.height)}
-          >
-            {lyricsData.map((line, i) => (
-              <View key={i}>
-                <Text style={[
-                  styles.lyricLine,
-                  { color: i === currentLyricIndex ? colors.accent : colors.textMuted },
-                  i === currentLyricIndex && styles.lyricActive
-                ]}>
-                  {line.text}
-                </Text>
-                {line.translation ? (
-                  <Text style={[styles.lyricTranslation, { color: colors.textMuted }]}>
-                    {line.translation}
+          <>
+            <ScrollView
+              ref={lyricsScrollRef}
+              style={styles.lyricsScroll}
+              contentContainerStyle={[
+                styles.lyricsContent,
+                { paddingVertical: Math.max(20, Math.floor(scrollAreaHeight / 2 - 20)) }
+              ]}
+              onLayout={(e) => setScrollAreaHeight(e.nativeEvent.layout.height)}
+              onScroll={handleLyricsScroll}
+              scrollEventThrottle={16}
+              onScrollBeginDrag={handleScrollBeginDrag}
+              onScrollEndDrag={handleScrollEndDrag}
+              onMomentumScrollBegin={handleMomentumScrollBegin}
+              onMomentumScrollEnd={handleMomentumScrollEnd}
+            >
+              {lyricsData.map((line, i) => {
+                const isActive = i === currentLyricIndex;
+                const isFocused = showJumpControl && i === focusedLyricIndex;
+                return (
+                  <View
+                    key={i}
+                    style={styles.lyricItem}
+                    onLayout={(e) => {
+                      lineLayouts.current[i] = e.nativeEvent.layout;
+                    }}
+                  >
+                    <Text style={[
+                      styles.lyricLine,
+                      {
+                        color: isActive
+                          ? colors.accent
+                          : (isFocused ? colors.textPrimary : colors.textMuted)
+                      },
+                      isActive && styles.lyricActive,
+                      isFocused && !isActive && styles.lyricFocused,
+                    ]}>
+                      {line.text}
+                    </Text>
+                    {line.translation ? (
+                      <Text style={[styles.lyricTranslation, { color: colors.textMuted }]}>
+                        {line.translation}
+                      </Text>
+                    ) : null}
+                  </View>
+                );
+              })}
+            </ScrollView>
+
+            {/* 手动拖拽出现的播放标志与对齐虚线 */}
+            {showJumpControl && focusedLyricIndex >= 0 && lyricsData[focusedLyricIndex] && (
+              <View style={styles.jumpControlOverlay} pointerEvents="box-none">
+                <View style={[styles.jumpGuideLine, { borderColor: colors.border || 'rgba(255,255,255,0.25)' }]} />
+                <TouchableOpacity
+                  style={[styles.jumpPlayBtn, { backgroundColor: colors.accent }]}
+                  onPress={handleJumpToLyric}
+                  activeOpacity={0.8}
+                  hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                >
+                  <Text style={styles.jumpTimeText}>
+                    {formatTime(lyricsData[focusedLyricIndex].time)}
                   </Text>
-                ) : null}
+                  <PlayIcon width={12} height={12} color="#fff" />
+                </TouchableOpacity>
               </View>
-            ))}
-          </ScrollView>
+            )}
+          </>
         ) : (
           <View style={styles.noLyricsPlaceholder}>
             <Text style={[styles.noLyricsText, { color: colors.textMuted }]}>
@@ -625,6 +803,7 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingHorizontal: 28,
     minHeight: 60,
+    position: 'relative',
   },
   lyricsScroll: {
     flex: 1,
@@ -632,20 +811,68 @@ const styles = StyleSheet.create({
   lyricsContent: {
     paddingVertical: 10,
   },
+  lyricItem: {
+    paddingVertical: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   lyricLine: {
     fontSize: 15,
     textAlign: 'center',
-    lineHeight: 32,
+    lineHeight: 26,
   },
   lyricActive: {
     fontSize: 17,
     fontWeight: '700',
   },
+  lyricFocused: {
+    fontWeight: '700',
+    opacity: 0.95,
+  },
   lyricTranslation: {
     fontSize: 12,
     textAlign: 'center',
-    lineHeight: 20,
+    lineHeight: 18,
     opacity: 0.7,
+    marginTop: 2,
+  },
+  jumpControlOverlay: {
+    position: 'absolute',
+    left: 8,
+    right: 8,
+    top: '50%',
+    transform: [{ translateY: -16 }],
+    height: 32,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    zIndex: 100,
+  },
+  jumpGuideLine: {
+    flex: 1,
+    height: 0,
+    borderTopWidth: 1,
+    borderStyle: 'dashed',
+    marginRight: 10,
+    opacity: 0.4,
+  },
+  jumpPlayBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 16,
+    gap: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 6,
+  },
+  jumpTimeText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
   },
   noLyricsPlaceholder: {
     flex: 1,

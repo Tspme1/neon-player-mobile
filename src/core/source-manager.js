@@ -1007,39 +1007,33 @@ async function _musicSongUrlImpl(playSource, songId, platform, song, quality = '
         }
 
         // 第二步: WebView 沙箱（传入平台参数，支持五平台）
-        const AppState = (await import('react-native')).AppState;
-        const isBackground = AppState.currentState === 'background';
-        _log(`LX source: isBackground=${isBackground} platform=${platform}`);
-
-        if (!isBackground) {
-          _log('LX: fallback to WebView');
-          let url = null;
-          if (isSandboxReady()) {
-            _log('LX: sandbox ready, getLxMusicUrlWebView start');
+        _log('LX: fallback to WebView');
+        url = null;
+        if (isSandboxReady()) {
+          _log('LX: sandbox ready, getLxMusicUrlWebView start');
+          url = await getLxMusicUrlWebView(sourceId, songId, '128k', platform);
+          _log(`LX: getLxMusicUrlWebView done: ${url ? 'has url' : 'null'}`);
+        } else {
+          _log('LX: sandbox not ready, waitForSandboxReady(5000)');
+          const waited = await waitForSandboxReady(5000);
+          _log(`LX: waitForSandboxReady result: ${waited}`);
+          if (waited) {
             url = await getLxMusicUrlWebView(sourceId, songId, '128k', platform);
             _log(`LX: getLxMusicUrlWebView done: ${url ? 'has url' : 'null'}`);
-          } else {
-            _log('LX: sandbox not ready, waitForSandboxReady(5000)');
-            const waited = await waitForSandboxReady(5000);
-            _log(`LX: waitForSandboxReady result: ${waited}`);
-            if (waited) {
-              url = await getLxMusicUrlWebView(sourceId, songId, '128k', platform);
-              _log(`LX: getLxMusicUrlWebView done: ${url ? 'has url' : 'null'}`);
-            }
           }
-          if (url && typeof url === 'string' && url.startsWith('http')) {
-            // 检测 QQ 音乐试听版 URL（RS02 开头，只有 30秒-1分钟）
-            if (platform === 'tencent' && url.includes('/RS02')) {
-              _log('LX: QQ music preview URL detected (RS02), fallback to official API');
-              const officialUrl = await getOfficialUrl('tencent', songId, song, quality);
-              if (officialUrl && officialUrl.url) {
-                _log('LX: QQ music official API fallback success');
-                return officialUrl;
-              }
-              _log('LX: QQ music official API fallback also failed');
-            } else {
-              return { url, isLocal: false };
+        }
+        if (url && typeof url === 'string' && url.startsWith('http')) {
+          // 检测 QQ 音乐试听版 URL（RS02 开头，只有 30秒-1分钟）
+          if (platform === 'tencent' && url.includes('/RS02')) {
+            _log('LX: QQ music preview URL detected (RS02), fallback to official API');
+            const officialUrl = await getOfficialUrl('tencent', songId, song, quality);
+            if (officialUrl && officialUrl.url) {
+              _log('LX: QQ music official API fallback success');
+              return officialUrl;
             }
+            _log('LX: QQ music official API fallback also failed');
+          } else {
+            return { url, isLocal: false };
           }
         }
 

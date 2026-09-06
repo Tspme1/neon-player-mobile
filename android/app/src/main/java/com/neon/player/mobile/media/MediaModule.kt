@@ -293,6 +293,16 @@ class MediaModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    @ReactMethod
+    fun addListener(eventName: String) {
+        // Required for React Native NativeEventEmitter
+    }
+
+    @ReactMethod
+    fun removeListeners(count: Int) {
+        // Required for React Native NativeEventEmitter
+    }
+
     // === Neon Player: allow mix with other apps ===
     // Note: This method is kept for JS compatibility but the actual mix-with-others
     // logic is handled in JS layer (auto-resume after audio focus interruption)

@@ -58,19 +58,18 @@ export default function LocalScreen() {
         copyToCacheDirectory: false,
       });
       if (!result.canceled && result.assets) {
-        setToast('正在导入...');
-        const cacheDir = FileSystem.cacheDirectory + 'local-music/';
-        await FileSystem.makeDirectoryAsync(cacheDir, { intermediates: true }).catch(() => {});
+        const storageDir = (FileSystem.documentDirectory || FileSystem.cacheDirectory) + 'local-music/';
+        await FileSystem.makeDirectoryAsync(storageDir, { intermediates: true }).catch(() => {});
 
         const newTracks = [];
         for (const a of result.assets) {
           const safeName = a.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-          const cachedPath = cacheDir + Date.now() + '_' + safeName;
+          const persistentPath = storageDir + Date.now() + '_' + safeName;
           try {
-            await FileSystem.copyAsync({ from: a.uri, to: cachedPath });
+            await FileSystem.copyAsync({ from: a.uri, to: persistentPath });
             newTracks.push({
-              path: cachedPath,
-              cachedPath: cachedPath,
+              path: persistentPath,
+              cachedPath: persistentPath,
               originalUri: a.uri,
               name: a.name,
               type: 'local',

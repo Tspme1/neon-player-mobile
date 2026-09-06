@@ -2,6 +2,7 @@
 // 管理单一 Audio.Sound 实例、播放队列、播放模式、漫游模式、切歌流程
 // 通过 event-bus emit 状态变化，接收 media-session 控制事件
 import { Audio } from 'expo-av';
+import * as FileSystem from 'expo-file-system/legacy';
 import { NativeModules, AppState } from 'react-native';
 import { EVENTS, emit, on } from './event-bus';
 import {
@@ -115,6 +116,9 @@ async function unloadSound() {
     soundObject = null;
     try {
       oldSound.setOnPlaybackStatusUpdate(null);
+      try {
+        await oldSound.pauseAsync();
+      } catch {}
       await oldSound.unloadAsync();
     } catch {}
   }
@@ -173,6 +177,11 @@ function setupPlaybackStatusUpdate() {
           playNext();
         }
       }
+    } else if (status.error) {
+      console.error(`[PlayerEngine] Playback error: ${status.error}`);
+      isPlaying = false;
+      emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position, duration });
+      showToast('播放异常');
     }
   });
 }
@@ -257,6 +266,59 @@ export function getQueueSource() {
 }
 
 // =====================================================================
+// 内部辅助 — 本地音频路径解析
+// =====================================================================
+
+async function resolveLocalAudioUri(track) {
+  if (!track) return null;
+  const rawPath = track.path || track.uri || track.cachedPath || '';
+  if (!rawPath) return null;
+
+  // 1. content:// 协议直接使用
+  if (rawPath.startsWith('content://')) {
+    return rawPath;
+  }
+
+  // 2. 剥离 file:// 得到纯本地路径
+  let cleanPath = rawPath;
+  if (cleanPath.startsWith('file://')) {
+    cleanPath = cleanPath.slice(7);
+  }
+  cleanPath = cleanPath.replace(/\\/g, '/');
+
+  // 3. 检查原路径是否存在
+  try {
+    const info = await FileSystem.getInfoAsync('file://' + cleanPath);
+    if (info.exists) {
+      return 'file://' + cleanPath;
+    }
+  } catch {}
+
+  // 4. 从文件名去 documentDirectory 和 cacheDirectory 搜索
+  const fileName = cleanPath.split('/').pop();
+  if (fileName) {
+    const docPath = (FileSystem.documentDirectory || '') + 'local-music/' + fileName;
+    try {
+      const docInfo = await FileSystem.getInfoAsync(docPath);
+      if (docInfo.exists) return docPath;
+    } catch {}
+
+    const cachePath = (FileSystem.cacheDirectory || '') + 'local-music/' + fileName;
+    try {
+      const cacheInfo = await FileSystem.getInfoAsync(cachePath);
+      if (cacheInfo.exists) return cachePath;
+    } catch {}
+  }
+
+  // 5. 回退使用原始 URI
+  if (track.originalUri) {
+    return track.originalUri;
+  }
+
+  return rawPath.startsWith('file://') ? rawPath : ('file://' + rawPath);
+}
+
+// =====================================================================
 // 公开 API — 播放控制
 // =====================================================================
 
@@ -270,14 +332,32 @@ export async function togglePlay() {
   userPaused = wasPlaying; // track user intent
   try {
     if (soundObject) {
-      if (wasPlaying) await soundObject.pauseAsync();
-      else { userPaused = false; await soundObject.playAsync(); }
+      if (wasPlaying) {
+        await soundObject.pauseAsync();
+        isPlaying = false;
+      } else {
+        userPaused = false;
+        await soundObject.playAsync();
+        isPlaying = true;
+      }
+    } else if (currentIndex >= 0 && currentIndex < playlist.length) {
+      // 当前没有 soundObject（例如之前加载失败或未初始化），用户点击播放时重试当前歌曲
+      userPaused = false;
+      await playTrack(currentIndex);
+      return;
     }
   } catch (e) {
     console.error('[PlayerEngine] togglePlay error:', e);
+    // 若 playAsync 失败（如音频已被系统中断卸载），尝试重新加载该曲目
+    if (!wasPlaying && currentIndex >= 0 && currentIndex < playlist.length) {
+      try {
+        userPaused = false;
+        await playTrack(currentIndex);
+        return;
+      } catch {}
+    }
+    isPlaying = false;
   }
-  // 用之前记录的状态翻转，避免回调已修改 isPlaying
-  isPlaying = !wasPlaying;
   emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying, position, duration });
 }
 
@@ -290,8 +370,14 @@ export async function playTrack(index) {
   currentIndex = index;
   if (isRoaming) roamIndex = index;
 
-  // 立即 emit TRACK_CHANGE，让 UI 即时显示新曲目信息
+  // 立即 emit TRACK_CHANGE 和 STATE_CHANGE，让 UI 即时显示新曲目信息并置为暂停等待
+  isPlaying = false;
+  resetLyrics();
   emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track, index, isPlaying: false, isRoaming });
+  emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position: 0, duration: track.duration || 0 });
+
+  // 立即停止并卸载上一首音乐，音乐立马暂停等待下一首
+  await unloadSound();
 
   if (track.type === 'online') {
     await playOnlineSong(track, index);
@@ -299,10 +385,17 @@ export async function playTrack(index) {
   }
 
   // Local track
-  await unloadSound();
   try {
+    const playUri = await resolveLocalAudioUri(track);
+    if (!playUri) {
+      showToast('本地文件不存在或无法访问');
+      isPlaying = false;
+      emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track, index, isPlaying: false, isRoaming });
+      emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position: 0, duration: 0 });
+      return;
+    }
     soundObject = new Audio.Sound();
-    await soundObject.loadAsync({ uri: track.path });
+    await soundObject.loadAsync({ uri: playUri });
     await soundObject.setVolumeAsync(volume);
     setupPlaybackStatusUpdate();
     await soundObject.playAsync();
@@ -314,6 +407,9 @@ export async function playTrack(index) {
   } catch (e) {
     console.error('[PlayerEngine] playTrack error:', e);
     showToast('播放失败');
+    isPlaying = false;
+    emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track, index, isPlaying: false, isRoaming });
+    emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position: 0, duration: 0 });
   }
 }
 
@@ -355,6 +451,10 @@ export async function playOnlineSong(song, queueIndex = -1) {
   resetLyrics(); // 清空上一首歌词
   emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position: 0, duration: 0 });
 
+  _dbgLog('unloadSound start');
+  await unloadSound();
+  _dbgLog('unloadSound done');
+
   // Check URL cache（用 platform 做 key）
   const cacheKey = `${platform}_${songId}`;
   let songUrlData = getCachedUrl(cacheKey);
@@ -383,10 +483,6 @@ export async function playOnlineSong(song, queueIndex = -1) {
     ]).then(r => { _dbgLog(`musicSongUrl done: ${r ? 'has url' : 'null'}`); return r; }).catch(() => null);
   }
 
-  // 等待卸载和 URL 获取都完成
-  _dbgLog('unloadSound start');
-  await unloadSound();
-  _dbgLog('unloadSound done');
   if (urlPromise) {
     songUrlData = await urlPromise;
   }
@@ -400,9 +496,9 @@ export async function playOnlineSong(song, queueIndex = -1) {
         showToast(fee === 1 || fee === 8 ? '此歌曲为 VIP 专享,无法播放' : '无法获取歌曲链接');
         _dbgLog('ABORT: no url');
       }
-      if (queueSource === 'roam' || isRoaming) {
-        setTimeout(() => playNext(), 600);
-      }
+      isPlaying = false;
+      emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track: song, index: targetIndex, isPlaying: false, isRoaming: isRoaming || queueSource === 'roam' });
+      emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position: 0, duration: 0 });
       return;
   }
   setCachedUrl(cacheKey, songUrlData);
@@ -501,6 +597,9 @@ export async function playOnlineSong(song, queueIndex = -1) {
   } catch (e) {
     console.error('[PlayerEngine] playOnlineSong error:', e);
     showToast('播放失败');
+    isPlaying = false;
+    emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track: song, index: targetIndex, isPlaying: false, isRoaming: isRoaming || queueSource === 'roam' });
+    emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position: 0, duration: 0 });
   }
 }
 
