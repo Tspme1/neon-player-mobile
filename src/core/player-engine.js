@@ -10,7 +10,9 @@ import {
   neteaseSongUrl,
   neteaseShuffleSongs,
   neteaseLyrics,
+  neteaseSongPic,
 } from './source-manager';
+import { extractLocalCover } from '../utils/id3-cover';
 import {
   getCachedUrl,
   setCachedUrl,
@@ -361,6 +363,58 @@ export async function togglePlay() {
   emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying, position, duration });
 }
 
+// =====================================================================
+// 封面管道 — 切歌时先发已知封面（搜索直出 picUrl），缺失则异步补拉
+// 补拉来源：网易 → song/detail 接口；本地 → ID3v2/FLAC/M4A 内嵌图提取
+// 永不阻塞播放；切歌竞态由 key 校验保护
+// =====================================================================
+
+function _coverKey(t) {
+  return (t && (t.songId || t.id || t.path)) || null;
+}
+
+function notifyTrackCover(track) {
+  if (!track) return;
+  const trackKey = _coverKey(track);
+
+  // 1. 同步段：已知封面立即广播（含空值，用于清掉上一首的封面）
+  const immediate = track.picUrl || track.cover || '';
+  emit(EVENTS.COVER_UPDATE, { url: immediate, key: trackKey });
+  if (immediate) return;
+
+  // 2. 异步段：补拉（不 await，不影响播放主流程）
+  (async () => {
+    try {
+      let url = '';
+      if (track.type === 'local' || (!track.type && track.path)) {
+        // 本地歌曲：先解析可用 URI，再提取内嵌封面
+        const uri = await resolveLocalAudioUri(track);
+        if (uri) url = await extractLocalCover(uri) || '';
+      } else {
+        // 在线歌曲：平台检测逻辑与 playOnlineSong 保持一致
+        const source = track._src || track._platform || currentSource || 'netease';
+        const platform = track._platform || (String(source).startsWith('lx:') ? 'netease' : source);
+        if (platform === 'netease' && (track.songId || track.id)) {
+          url = await neteaseSongPic(track.songId || track.id);
+        }
+        // 腾讯/酷狗/酷我：搜索已直出 picUrl，此处无需补拉；
+        // 老版本播放列表条目缺字段时维持占位图（不做搜索模糊匹配，避免错封面）
+      }
+      if (!url) return;
+
+      // 3. 竞态校验：补拉完成时用户可能已切到下一首
+      const cur = playlist[currentIndex];
+      if (_coverKey(cur) !== trackKey) return;
+
+      // 4. 写回 track（供播放列表持久化与收藏流程复用）并广播
+      track.picUrl = url;
+      emit(EVENTS.COVER_UPDATE, { url, key: trackKey });
+    } catch (e) {
+      console.log('[PlayerEngine] cover resolve error:', e && e.message);
+    }
+  })();
+}
+
 export async function playTrack(index) {
   userPaused = false;
   if (index < 0 || index >= playlist.length) return;
@@ -374,6 +428,7 @@ export async function playTrack(index) {
   isPlaying = false;
   resetLyrics();
   emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track, index, isPlaying: false, isRoaming });
+  notifyTrackCover(track);
   emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position: 0, duration: track.duration || 0 });
 
   // 立即停止并卸载上一首音乐，音乐立马暂停等待下一首
@@ -401,9 +456,11 @@ export async function playTrack(index) {
     await soundObject.playAsync();
     isPlaying = true;
     currentOnlineSong = null;
-    resetLyrics(); // 清空上一首歌词
     emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track, index, isPlaying: true, isRoaming });
     emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: true, position: 0, duration: track.duration || 0 });
+
+    // 获取本地音乐歌词（读取同名 .lrc 或跨源搜索同名歌词兜底）
+    fetchLyrics(track);
   } catch (e) {
     console.error('[PlayerEngine] playTrack error:', e);
     showToast('播放失败');
@@ -498,6 +555,7 @@ export async function playOnlineSong(song, queueIndex = -1) {
       }
       isPlaying = false;
       emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track: song, index: targetIndex, isPlaying: false, isRoaming: isRoaming || queueSource === 'roam' });
+      notifyTrackCover(song);
       emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position: 0, duration: 0 });
       return;
   }
@@ -582,10 +640,11 @@ export async function playOnlineSong(song, queueIndex = -1) {
     }
 
     emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track: song, index: targetIndex, isPlaying: true, isRoaming: isRoaming || queueSource === 'roam' });
+    notifyTrackCover(song);
     emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: true, position: 0, duration: song.duration || 0 });
 
-    // Fetch lyrics
-    fetchLyrics(songId);
+    // Fetch lyrics（支持全平台、LX音源及同名兜底）
+    fetchLyrics({ ...song, songId, _platform: platform });
 
     // 已有文件缓存时，检查缓存限额
     if (!songUrlData.isLocal && usedFileCache) {
@@ -599,6 +658,7 @@ export async function playOnlineSong(song, queueIndex = -1) {
     showToast('播放失败');
     isPlaying = false;
     emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track: song, index: targetIndex, isPlaying: false, isRoaming: isRoaming || queueSource === 'roam' });
+    notifyTrackCover(song);
     emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position: 0, duration: 0 });
   }
 }

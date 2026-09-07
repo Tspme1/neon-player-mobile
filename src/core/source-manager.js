@@ -137,6 +137,312 @@ async function neteaseLyrics(songId) {
   return { lrc: '', tlyric: '' };
 }
 
+// === HTML 实体反转义工具 (参考 lx-music decodeName) ===
+function decodeHtmlEntities(str) {
+  if (!str || typeof str !== 'string') return '';
+  return str
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#32;/g, ' ')
+    .replace(/&#10;/g, '\n')
+    .replace(/&#13;/g, '\r')
+    .replace(/&#38;/g, '&')
+    .replace(/&#39;/g, "'")
+    .replace(/&#40;/g, '(')
+    .replace(/&#41;/g, ')')
+    .replace(/&#58;/g, ':')
+    .replace(/&#60;/g, '<')
+    .replace(/&#62;/g, '>')
+    .replace(/&#133;/g, '...');
+}
+
+// === Base64 UTF-8 解码工具 ===
+function decodeBase64(str) {
+  if (!str) return '';
+  const clean = String(str).replace(/[\r\n\s]/g, '');
+  // 1. Buffer 优先 (Node / polyfill 环境)
+  try {
+    if (typeof Buffer !== 'undefined') {
+      return Buffer.from(clean, 'base64').toString('utf8');
+    }
+  } catch {}
+  // 2. TextDecoder + atob (Hermes / 现代 JS 原生支持，容错不中断)
+  try {
+    if (typeof atob === 'function' && typeof TextDecoder !== 'undefined') {
+      const binary = atob(clean);
+      const len = binary.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+    }
+  } catch {}
+  // 3. crypto-js 兜底
+  try {
+    if (crypto && crypto.enc && crypto.enc.Base64) {
+      const words = crypto.enc.Base64.parse(clean);
+      const utf8 = words.toString(crypto.enc.Utf8);
+      if (utf8) return utf8;
+    }
+  } catch {}
+  // 4. 手动位移解码兜底
+  try {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    const cClean = clean.replace(/=+$/, '');
+    let bytes = [];
+    for (let i = 0; i < cClean.length; i += 4) {
+      const a = chars.indexOf(cClean[i]);
+      const b = chars.indexOf(cClean[i + 1]);
+      const c = cClean[i + 2] ? chars.indexOf(cClean[i + 2]) : 0;
+      const d = cClean[i + 3] ? chars.indexOf(cClean[i + 3]) : 0;
+      const n = (a << 18) | (b << 12) | (c << 6) | d;
+      bytes.push((n >> 16) & 0xff);
+      if (cClean[i + 2]) bytes.push((n >> 8) & 0xff);
+      if (cClean[i + 3]) bytes.push(n & 0xff);
+    }
+    let out = '';
+    let i = 0;
+    while (i < bytes.length) {
+      const c = bytes[i++];
+      if (c < 128) out += String.fromCharCode(c);
+      else if (c > 191 && c < 224) out += String.fromCharCode(((c & 31) << 6) | (bytes[i++] & 63));
+      else if (c > 223 && c < 240) out += String.fromCharCode(((c & 15) << 12) | ((bytes[i++] & 63) << 6) | (bytes[i++] & 63));
+      else if (c > 239 && c < 248) {
+        const cp = ((c & 7) << 18) | ((bytes[i++] & 63) << 12) | ((bytes[i++] & 63) << 6) | (bytes[i++] & 63);
+        out += String.fromCodePoint ? String.fromCodePoint(cp) : '';
+      }
+    }
+    return out;
+  } catch {}
+  return '';
+}
+
+// === QQ音乐/腾讯歌词 (参考 lx-music-mobile) ===
+async function tencentLyrics(songmid) {
+  if (!songmid) return { lrc: '', tlyric: '' };
+  console.log(`[SourceManager] tencentLyrics start: ${songmid}`);
+  try {
+    const url = `https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=${songmid}&g_tk=5381&loginUin=0&hostUin=0&format=json&inCharset=utf8&outCharset=utf-8&platform=yqq`;
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'Referer': 'https://y.qq.com/portal/player.html',
+    };
+    let text = '';
+    if (NativeModules.MediaModule && NativeModules.MediaModule.nativeHttpGet) {
+      text = await NativeModules.MediaModule.nativeHttpGet(url, JSON.stringify(headers));
+    } else {
+      const res = await fetch(url, { headers });
+      text = await res.text();
+    }
+    console.log(`[SourceManager] tencentLyrics response len: ${text ? text.length : 0}`);
+    if (text) {
+      let cleanText = text.trim();
+      const m = cleanText.match(/^[a-zA-Z_0-9$]+\s*\(([\s\S]*)\)\s*;?$/);
+      if (m) cleanText = m[1];
+      const parsed = JSON.parse(cleanText);
+      if (parsed && (parsed.code === 0 || parsed.lyric)) {
+        const rawLrc = decodeBase64(parsed.lyric || '');
+        const rawTlyric = decodeBase64(parsed.trans || '');
+        const lrc = decodeHtmlEntities(rawLrc);
+        const tlyric = decodeHtmlEntities(rawTlyric);
+        console.log(`[SourceManager] tencentLyrics success, lrc lines: ${lrc ? lrc.split('\n').length : 0}`);
+        return { lrc, tlyric };
+      } else {
+        console.warn(`[SourceManager] tencentLyrics non-zero code: ${parsed ? parsed.code : 'unknown'}`);
+      }
+    }
+  } catch (e) {
+    console.error('[SourceManager] tencentLyrics error:', e.message);
+  }
+  return { lrc: '', tlyric: '' };
+}
+
+// === 酷狗音乐歌词 (参考 lx-music-mobile 双阶段检索) ===
+async function kugouLyrics(song) {
+  if (!song) return { lrc: '', tlyric: '' };
+  const rawId = String(song.hash || song.songId || song.id || '');
+  const hash = (rawId.includes('|') ? rawId.split('|')[0] : rawId).toUpperCase();
+  if (!hash) return { lrc: '', tlyric: '' };
+  const durationMs = (parseInt(song.duration) || 0) * 1000;
+  const name = encodeURIComponent(song.name || '');
+  const headers = {
+    'KG-RC': '1',
+    'KG-THash': 'expand_search_manager.cpp:852736169:451',
+    'User-Agent': 'KuGou2012-9020-ExpandSearchManager',
+  };
+  try {
+    const searchUrl = `http://lyrics.kugou.com/search?ver=1&man=yes&client=pc&keyword=${name}&hash=${hash}&timelength=${durationMs}&lrctxt=1`;
+    let parsed;
+    if (NativeModules.MediaModule && NativeModules.MediaModule.nativeHttpGet) {
+      const text = await NativeModules.MediaModule.nativeHttpGet(searchUrl, JSON.stringify(headers));
+      parsed = JSON.parse(text);
+    } else {
+      const res = await fetch(searchUrl, { headers });
+      parsed = await res.json();
+    }
+    if (parsed && parsed.candidates && parsed.candidates.length > 0) {
+      const cand = parsed.candidates[0];
+      const dlUrl = `http://lyrics.kugou.com/download?ver=1&client=pc&id=${cand.id}&accesskey=${cand.accesskey}&fmt=lrc&charset=utf8`;
+      let dlParsed;
+      if (NativeModules.MediaModule && NativeModules.MediaModule.nativeHttpGet) {
+        const text = await NativeModules.MediaModule.nativeHttpGet(dlUrl, JSON.stringify(headers));
+        dlParsed = JSON.parse(text);
+      } else {
+        const res = await fetch(dlUrl, { headers });
+        dlParsed = await res.json();
+      }
+      if (dlParsed && dlParsed.content) {
+        const lrc = decodeHtmlEntities(decodeBase64(dlParsed.content));
+        return { lrc, tlyric: '' };
+      }
+    }
+  } catch (e) {
+    console.error('[SourceManager] kugouLyrics error:', e.message);
+  }
+  return { lrc: '', tlyric: '' };
+}
+
+// === 酷我音乐歌词 (参考 lx-music-mobile) ===
+async function kuwoLyrics(songId) {
+  if (!songId) return { lrc: '', tlyric: '' };
+  try {
+    const rid = String(songId).replace('MUSIC_', '');
+    const url = `http://m.kuwo.cn/newh5/singles/songinfoandlrc?musicId=${rid}&httpsStatus=1`;
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15',
+    };
+    let parsed;
+    if (NativeModules.MediaModule && NativeModules.MediaModule.nativeHttpGet) {
+      const text = await NativeModules.MediaModule.nativeHttpGet(url, JSON.stringify(headers));
+      parsed = JSON.parse(text);
+    } else {
+      const res = await fetch(url, { headers });
+      parsed = await res.json();
+    }
+    if (parsed && parsed.data && Array.isArray(parsed.data.lrclist) && parsed.data.lrclist.length > 0) {
+      const lines = parsed.data.lrclist.map(item => {
+        const t = parseFloat(item.time) || 0;
+        const m = Math.floor(t / 60).toString().padStart(2, '0');
+        const s = (t % 60).toFixed(2).padStart(5, '0');
+        return `[${m}:${s}]${decodeHtmlEntities(item.lineLyric || '')}`;
+      });
+      return { lrc: lines.join('\n'), tlyric: '' };
+    }
+  } catch (e) {
+    console.error('[SourceManager] kuwoLyrics error:', e.message);
+  }
+  return { lrc: '', tlyric: '' };
+}
+
+// === 跨源同名搜索兜底 (多源智能校验，杜绝曲目串音) ===
+async function searchFallbackLyrics(name, artist) {
+  if (!name) return { lrc: '', tlyric: '' };
+  try {
+    // 1. 提取首要歌手名，清洗合作者、工作室、特殊字符等 (如 "者来女 / 游戏科学 / 8082Audio" -> "者来女")
+    const rawArtist = (artist || '').split(/[/,、&|;；]/)[0] || '';
+    const cleanArtist = rawArtist.replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '').trim();
+    const keyword = `${name} ${cleanArtist}`.trim();
+    console.log(`[SourceManager] searchFallbackLyrics keyword: "${keyword}" (original: "${name}" - "${artist}")`);
+
+    const cleanTargetName = name.replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '').toLowerCase();
+
+    // 2. 优先尝试酷狗搜索（曲库与歌词匹配度最高，覆盖ACG/游戏原声及小众音乐）
+    try {
+      const kgSongs = await kugouSearch(keyword, 0, 5);
+      if (kgSongs && kgSongs.length > 0) {
+        const kgMatch = kgSongs.find(s => {
+          const sNameClean = (s.name || '').replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '').toLowerCase();
+          const nameMatches = sNameClean.includes(cleanTargetName) || cleanTargetName.includes(sNameClean);
+          if (!nameMatches) return false;
+          if (cleanArtist) {
+            const sArtistClean = (s.artist || '').replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '').toLowerCase();
+            return sArtistClean.includes(cleanArtist.toLowerCase()) || cleanArtist.toLowerCase().includes(sArtistClean);
+          }
+          return true;
+        });
+
+        if (kgMatch) {
+          console.log(`[SourceManager] searchFallbackLyrics KuGou match found: ${kgMatch.name} - ${kgMatch.artist}`);
+          const result = await kugouLyrics(kgMatch);
+          if (result && result.lrc) {
+            return result;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[SourceManager] searchFallbackLyrics KuGou error:', e.message);
+    }
+
+    // 3. 尝试网易云搜索（带严格歌名与歌手匹配校验，严禁盲目取首条）
+    try {
+      const wySongs = await neteaseSearch(keyword, 5);
+      if (wySongs && wySongs.length > 0) {
+        const wyMatch = wySongs.find(s => {
+          const sNameClean = (s.name || '').replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '').toLowerCase();
+          const nameMatches = sNameClean.includes(cleanTargetName) || cleanTargetName.includes(sNameClean);
+          if (!nameMatches) return false;
+          if (cleanArtist) {
+            const sArtistClean = (s.artist || '').replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '').toLowerCase();
+            return sArtistClean.includes(cleanArtist.toLowerCase()) || cleanArtist.toLowerCase().includes(sArtistClean);
+          }
+          return true;
+        });
+
+        if (wyMatch) {
+          console.log(`[SourceManager] searchFallbackLyrics NetEase match found: ${wyMatch.name} - ${wyMatch.artist}`);
+          const result = await neteaseLyrics(wyMatch.id);
+          if (result && result.lrc) {
+            return result;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[SourceManager] searchFallbackLyrics NetEase error:', e.message);
+    }
+  } catch (e) {
+    console.error('[SourceManager] searchFallbackLyrics error:', e.message);
+  }
+  return { lrc: '', tlyric: '' };
+}
+
+// 网易云歌曲封面补拉：搜索接口（/api/search/get/web）的 album 对象不含 picUrl，
+// 需调 song/detail 换取完整专辑图。结果带内存缓存，切歌回放不重复请求。
+// 实测：songs[0].album.picUrl 为 https CDN 地址，?param=300y300 可缩放。
+const neteasePicCache = new Map(); // songId -> picUrl | ''
+export async function neteaseSongPic(songId) {
+  if (!songId) return '';
+  if (neteasePicCache.has(songId)) return neteasePicCache.get(songId);
+  try {
+    const url = `https://music.163.com/api/song/detail?id=${songId}&idss=&ids=${encodeURIComponent(JSON.stringify([Number(songId)]))}`;
+    const result = await fetchJSON(url);
+    let pic = '';
+    if (result.code === 200 && result.songs && result.songs[0]) {
+      const alb = result.songs[0].album || {};
+      pic = alb.picUrl || '';
+      if (pic) {
+        pic = String(pic).replace(/^http:/, 'https:').split('?')[0] + '?param=300y300';
+      }
+    }
+    neteasePicCache.set(songId, pic);
+    if (neteasePicCache.size > 300) {
+      // 简单防溢出：超 300 条时清掉前一半（FIFO）
+      let drop = neteasePicCache.size - 200;
+      for (const k of neteasePicCache.keys()) {
+        if (drop-- <= 0) break;
+        neteasePicCache.delete(k);
+      }
+    }
+    return pic;
+  } catch (e) {
+    console.error('[SourceManager] Song pic error:', e.message);
+    return '';
+  }
+}
+
 async function neteaseToplist() {
   try {
     const result = await fetchJSON('https://music.163.com/api/toplist');
@@ -167,6 +473,9 @@ async function neteaseToplistDetail(toplistId) {
         album: song.al ? song.al.name : '',
         duration: Math.floor(song.dt / 1000),
         fee: song.fee || 0,
+        // 榜单详情接口的 tracks 自带 al.picUrl（实测验证；如缺失由切歌补拉兜底）
+        // 接口返回 http://，图床本身支持 https，统一升级避免 cleartext 依赖
+        picUrl: (song.al && song.al.picUrl) ? String(song.al.picUrl).replace(/^http:/, 'https:') + '?param=300y300' : '',
       }));
     }
   } catch (e) {
@@ -236,6 +545,13 @@ async function kuwoSearch(keyword, page = 0, limit = 30) {
         name, artist, album,
         duration: parseInt(s.DURATION || 0),
         fee: (parseInt(s.KMARK || 0) > 0) ? 1 : 0, _src: 'kuwo',
+        // 封面：搜索自带 web_albumpic_short（形如 "120/s3s94/93/xxx.jpg"，首段是尺寸）
+        // 拼接 img1.kwcdn.kuwo.cn/star/albumcover/{size}/...（实测 200/108KB@500px）
+        // 注意：该 CDN https 证书不匹配（SAN 不含此域名）→ 只能用 http，
+        // 依赖 AndroidManifest 的 usesCleartextTraffic=true。将来关 cleartext 时需改造。
+        picUrl: s.web_albumpic_short
+          ? 'http://img1.kwcdn.kuwo.cn/star/albumcover/500/' + String(s.web_albumpic_short).replace(/^\d+\//, '')
+          : '',
       };
     });
     return songs;
@@ -289,6 +605,9 @@ async function kugouSearch(keyword, page = 0, limit = 30) {
         name, artist, album,
         duration: parseInt(s.Duration || 0),
         fee: (s.Privilege && s.Privilege > 0) ? 1 : 0, _src: 'kugou',
+        // 封面：搜索接口自带 Image 字段（形如 http://imge.kugou.com/stdmusic/{size}/xxx.jpg）
+        // {size} 替换为 240/400 即可缩放（实测 https 可用，与 http 同源同证书）
+        picUrl: s.Image ? s.Image.replace('{size}', '400').replace(/^http:/, 'https:') : '',
       };
     });
     return songs;
@@ -413,6 +732,13 @@ async function tencentSearch(keyword, page = 0, limit = 30) {
       duration: parseInt(s.interval || 0),
       fee: s.pay && s.pay.payplay ? 1 : 0,
       _src: 'tencent',
+      // 封面：lx-music 同款拼接公式（实测 200/33KB@300px，无 Referer 也可加载）
+      // T002=专辑图；无专辑 mid 时降级 T001=歌手图
+      picUrl: s.albummid
+        ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${s.albummid}.jpg`
+        : (s.singer && s.singer[0] && s.singer[0].mid
+          ? `https://y.gtimg.cn/music/photo_new/T001R300x300M000${s.singer[0].mid}.jpg`
+          : ''),
     }));
     return songs;
   } catch {
@@ -1103,6 +1429,10 @@ export {
   neteaseToplist,
   neteaseToplistDetail,
   neteaseShuffleSongs,
+  tencentLyrics,
+  kugouLyrics,
+  kuwoLyrics,
+  searchFallbackLyrics,
 };
 
 export default {
@@ -1129,4 +1459,8 @@ export default {
   neteaseToplist,
   neteaseToplistDetail,
   neteaseShuffleSongs,
+  tencentLyrics,
+  kugouLyrics,
+  kuwoLyrics,
+  searchFallbackLyrics,
 };

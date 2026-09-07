@@ -25,8 +25,10 @@ import androidx.media.session.MediaButtonReceiver
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.neon.player.mobile.MainActivity
 import com.neon.player.mobile.R
+import okhttp3.Cache
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -140,8 +142,9 @@ class MediaService : Service() {
         // BroadcastReceiver for notification actions
         ensureBroadcastReceiver()
 
-        // OkHttpClient for artwork loading
+        // OkHttpClient for artwork loading with 20MB disk cache
         httpClient = OkHttpClient.Builder()
+            .cache(Cache(File(cacheDir, "okhttp-covers"), 20L * 1024 * 1024))
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
             .build()
@@ -280,6 +283,18 @@ class MediaService : Service() {
         val client = httpClient ?: return
         executor.execute {
             try {
+                // file:// URI（本地音乐内嵌封面）直接解码，不走 OkHttp
+                if (url.startsWith("file://")) {
+                    val path = url.removePrefix("file://")
+                    val bitmap = BitmapFactory.decodeFile(path)
+                    if (bitmap != null) {
+                        currentArtworkBitmap = bitmap
+                        updateMediaSession()
+                        updateNotification()
+                    }
+                    return@execute
+                }
+
                 val request = Request.Builder().url(url).build()
                 client.newCall(request).execute().use { response ->
                     if (response.isSuccessful) {

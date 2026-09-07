@@ -283,6 +283,55 @@ export async function getLxMusicUrlWebView(sourceId, songId, quality = '128k', p
   return null;
 }
 
+// ====== 请求歌词 (LX 音源) ======
+export async function getLxLyricWebView(sourceId, song, platform = 'netease') {
+  if (!song) return null;
+  const songId = song.songId || song.id || song.songmid || song.hash || '';
+
+  // 确保初始化
+  if (_currentSourceId !== sourceId || !_inited) {
+    const ok = await initLxSource(sourceId);
+    if (!ok) return null;
+  }
+
+  const lxSourceMap = {
+    netease: 'wy',
+    tencent: 'tx',
+    kuwo: 'kw',
+    kugou: 'kg',
+    migu: 'mg',
+  };
+  const lxSource = lxSourceMap[platform] || 'wy';
+
+  const musicInfo = {
+    id: `${lxSource}_${songId}`,
+    source: lxSource,
+    meta: { songId: String(songId), albumId: song.albumId || '', albumName: song.album || '' },
+    songmid: String(song.songmid || songId),
+    hash: String(song.hash || songId),
+    name: song.name || '',
+    singer: song.artist || '',
+  };
+
+  try {
+    const result = await _requestViaWebView('lyric', musicInfo, lxSource);
+    if (result && typeof result === 'object') {
+      const lrc = result.lyric || result.lrc || '';
+      const tlyric = result.tlyric || '';
+      const rlyric = result.rlyric || '';
+      const lxlyric = result.lxlyric || '';
+      if (lrc) {
+        return { lrc, tlyric, rlyric, lxlyric };
+      }
+    } else if (typeof result === 'string' && result.trim()) {
+      return { lrc: result, tlyric: '' };
+    }
+  } catch (e) {
+    console.error('[LxWebViewManager] getLxLyricWebView error:', e.message);
+  }
+  return null;
+}
+
 // ====== 通过 WebView 调用 handler ======
 function _requestViaWebView(action, musicInfo, source, quality = '128k') {
   return new Promise((resolve) => {

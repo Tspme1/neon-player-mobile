@@ -12,6 +12,8 @@ export const EVENTS = {
   // 歌词
   LYRICS_LOADED: 'lyrics:loaded',
   LYRICS_HIGHLIGHT: 'lyrics:highlight',
+  // 封面（切歌后异步补拉到封面时触发，UI/通知栏据此刷新）
+  COVER_UPDATE: 'cover:update',
   // 收藏
   FAVORITE_TOGGLE: 'favorite:toggle',
   FAVORITE_STATE_CHANGE: 'favorite:state-change',

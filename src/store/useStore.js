@@ -41,6 +41,9 @@ export const usePlayerStore = create((set, get) => ({
   lyricsData: [],
   currentLyricIndex: -1,
 
+  // === 封面（当前播放曲目，来自搜索直出/异步补拉） ===
+  currentCoverUrl: null,
+
   // === 收藏与歌单 ===
   favorites: [],
   customPlaylists: [],
@@ -462,6 +465,13 @@ export function initStore() {
   // lyrics:loaded → 更新歌词数据
   on(EVENTS.LYRICS_LOADED, (data) => {
     usePlayerStore.setState({ lyricsData: data.lyrics, currentLyricIndex: -1 });
+  });
+
+  // cover:update → 更新当前曲目封面（切歌时引擎必发一次，含空值清场）
+  on(EVENTS.COVER_UPDATE, (data) => {
+    if (data && data.url !== undefined) {
+      usePlayerStore.setState({ currentCoverUrl: data.url || null });
+    }
   });
 
   // lyrics:highlight → 更新当前歌词行

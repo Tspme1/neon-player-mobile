@@ -1,8 +1,18 @@
-// 歌词引擎 — 从 store/player.js 歌词逻辑 + utils/lyrics.js 合并
-// 提供歌词获取、解析、高亮更新，通过 event-bus 通知外部
+// 歌词引擎 — 支持全平台（网易云、QQ音乐、酷狗、酷我、本地文件、LX自定义音源及跨源兜底）
+// 提供歌词获取、解析、高亮更新、内存缓存、防并发竞态控制，通过 event-bus 通知外部
+
 import { parseLyrics, findCurrentLyricIndex } from '../utils/lyrics';
-import { neteaseLyrics } from './source-manager';
+import {
+  neteaseLyrics,
+  tencentLyrics,
+  kugouLyrics,
+  kuwoLyrics,
+  searchFallbackLyrics,
+} from './source-manager';
+import { getLxLyricWebView } from '../services/lx-webview-manager';
+import { loadSettings } from './storage';
 import { EVENTS, emit } from './event-bus';
+import * as FileSystem from 'expo-file-system/legacy';
 
 // =====================================================================
 // 歌词状态（模块内部）
@@ -10,36 +20,185 @@ import { EVENTS, emit } from './event-bus';
 
 let lyricsData = [];
 let currentLyricIndex = -1;
+let currentSongKey = '';
+let activeRequestToken = 0;
+const lyricsCache = new Map(); // key -> parsed lyrics array (max 200 items)
+
+// =====================================================================
+// 辅助方法
+// =====================================================================
+
+/**
+ * 生成歌曲唯一标识缓存 key
+ */
+function getTrackKey(track) {
+  if (!track) return '';
+  if (typeof track === 'string' || typeof track === 'number') return `netease_${track}`;
+  if (track.type === 'local' || (!track.type && (track.path || track.cachedPath))) {
+    return `local_${track.title || track.name || ''}_${track.artist || ''}_${track.path || track.cachedPath || ''}`;
+  }
+  const platform = track._platform || track._src || 'netease';
+  const id = track.songId || track.id || track.songmid || track.hash || '';
+  return `${platform}_${id}`;
+}
+
+/**
+ * 尝试读取本地同名 .lrc 文件
+ */
+async function readLocalLrc(track) {
+  const rawPath = track.cachedPath || track.path || track.uri || '';
+  if (!rawPath) return null;
+  const lrcCandidates = [];
+  if (rawPath.includes('.')) {
+    lrcCandidates.push(rawPath.replace(/\.[^.]+$/, '.lrc'));
+  }
+  lrcCandidates.push(rawPath + '.lrc');
+
+  for (const candidate of lrcCandidates) {
+    try {
+      const clean = candidate.replace(/\\/g, '/');
+      const uri = clean.startsWith('file://') ? clean : (clean.startsWith('/') ? 'file://' + clean : clean);
+      const info = await FileSystem.getInfoAsync(uri);
+      if (info && info.exists) {
+        const content = await FileSystem.readAsStringAsync(uri, { encoding: 'utf8' });
+        if (content && content.trim()) {
+          return { lrc: content, tlyric: '' };
+        }
+      }
+    } catch {
+      // 忽略文件读取错误
+    }
+  }
+  return null;
+}
 
 // =====================================================================
 // 公开 API
 // =====================================================================
 
 /**
- * 获取歌词（网易云 API）
+ * 获取歌词（多源路由 + 跨源同名搜索兜底 + 内存缓存）
  * 获取成功后通过 event-bus emit `lyrics:loaded`
- * @param {string|number} songId 歌曲ID
+ * @param {Object|string|number} trackOrSongId 歌曲对象或歌曲ID
  * @returns {Promise<Array>} 歌词数组
  */
-export async function fetchLyrics(songId) {
-  if (!songId) {
+export async function fetchLyrics(trackOrSongId) {
+  const reqToken = ++activeRequestToken;
+
+  if (!trackOrSongId) {
     lyricsData = [];
     currentLyricIndex = -1;
-    emit(EVENTS.LYRICS_LOADED, { lyrics: [], songId });
+    currentSongKey = '';
+    emit(EVENTS.LYRICS_LOADED, { lyrics: [], songId: null, track: null });
     return [];
   }
 
-  try {
-    const result = await neteaseLyrics(songId);
-    lyricsData = parseLyrics(result.lrc, result.tlyric);
+  // 统一转为歌曲对象
+  let track = trackOrSongId;
+  if (typeof trackOrSongId === 'string' || typeof trackOrSongId === 'number') {
+    track = { id: trackOrSongId, songId: trackOrSongId, _src: 'netease', type: 'online' };
+  }
+
+  const key = getTrackKey(track);
+
+  // 1. 检查内存缓存
+  if (key && lyricsCache.has(key)) {
+    const cached = lyricsCache.get(key);
+    lyricsData = cached;
     currentLyricIndex = -1;
-    emit(EVENTS.LYRICS_LOADED, { lyrics: lyricsData, songId });
+    currentSongKey = key;
+    emit(EVENTS.LYRICS_LOADED, { lyrics: cached, songId: track.songId || track.id, track });
+    return cached;
+  }
+
+  try {
+    let lrcRes = null;
+    const isLocal = track.type === 'local' || (!track.type && (track.path || track.cachedPath));
+
+    if (isLocal) {
+      // 本地歌曲优先查找同目录 .lrc
+      lrcRes = await readLocalLrc(track);
+    } else {
+      // 在线歌曲
+      const platform = track._platform || track._src || 'netease';
+      const songId = track.songId || track.id || track.songmid || track.hash;
+      console.log(`[LyricsEngine] fetchLyrics online: platform=${platform} songId=${songId}`);
+
+      // 优先检测是否配置了 LX 自定义音源
+      try {
+        const settings = await loadSettings();
+        const playSource = settings.playSource || 'official';
+        if (playSource.startsWith('lx:')) {
+          const lxSourceId = playSource.replace('lx:', '');
+          const lxResult = await getLxLyricWebView(lxSourceId, track, platform);
+          if (lxResult && lxResult.lrc) {
+            lrcRes = lxResult;
+            console.log(`[LyricsEngine] LX lyric fetched successfully`);
+          }
+        }
+      } catch (e) {
+        console.warn('[LyricsEngine] LX lyric attempt failed:', e.message);
+      }
+
+      // 如果 LX 音源未提供歌词，回退至官方接口
+      if (!lrcRes || !lrcRes.lrc) {
+        console.log(`[LyricsEngine] official lyric request for platform=${platform} songId=${songId}`);
+        if (platform === 'netease' && songId) {
+          lrcRes = await neteaseLyrics(songId);
+        } else if (platform === 'tencent') {
+          const songmid = track.songmid || songId;
+          lrcRes = await tencentLyrics(songmid);
+        } else if (platform === 'kugou') {
+          lrcRes = await kugouLyrics(track);
+        } else if (platform === 'kuwo') {
+          lrcRes = await kuwoLyrics(songId);
+        }
+      }
+    }
+
+    // 解析歌词
+    let parsed = (lrcRes && lrcRes.lrc) ? parseLyrics(lrcRes.lrc, lrcRes.tlyric) : [];
+
+    // 2. 跨源同名搜索兜底（如果专属源未返回有效歌词）
+    if (!parsed || parsed.length === 0) {
+      const title = track.name || track.title || '';
+      const artist = track.artist || '';
+      if (title) {
+        console.log(`[LyricsEngine] 专有源歌词缺失，启动跨源同名搜索兜底: ${title} - ${artist}`);
+        const fallbackRes = await searchFallbackLyrics(title, artist);
+        if (fallbackRes && fallbackRes.lrc) {
+          parsed = parseLyrics(fallbackRes.lrc, fallbackRes.tlyric);
+        }
+      }
+    }
+
+    // 3. 竞态检查：如果在异步等待期间用户切了歌，丢弃此次响应
+    if (reqToken !== activeRequestToken) {
+      return [];
+    }
+
+    lyricsData = parsed || [];
+    currentLyricIndex = -1;
+    currentSongKey = key;
+
+    // 写入缓存
+    if (key && lyricsData.length > 0) {
+      lyricsCache.set(key, lyricsData);
+      if (lyricsCache.size > 200) {
+        const firstKey = lyricsCache.keys().next().value;
+        lyricsCache.delete(firstKey);
+      }
+    }
+
+    emit(EVENTS.LYRICS_LOADED, { lyrics: lyricsData, songId: track.songId || track.id, track });
     return lyricsData;
   } catch (e) {
     console.error('[LyricsEngine] fetchLyrics error:', e.message);
-    lyricsData = [];
-    currentLyricIndex = -1;
-    emit(EVENTS.LYRICS_LOADED, { lyrics: [], songId });
+    if (reqToken === activeRequestToken) {
+      lyricsData = [];
+      currentLyricIndex = -1;
+      emit(EVENTS.LYRICS_LOADED, { lyrics: [], songId: track.songId || track.id, track });
+    }
     return [];
   }
 }
@@ -76,12 +235,14 @@ export function getCurrentLyricIndex() {
 }
 
 /**
- * 重置歌词状态（切歌时调用，清空上一首歌词并通知 UI）
+ * 重置歌词状态（切歌时调用，清空上一首歌词并取消正在进行的请求）
  */
 export function resetLyrics() {
+  activeRequestToken++;
   lyricsData = [];
   currentLyricIndex = -1;
-  emit(EVENTS.LYRICS_LOADED, { lyrics: [], songId: null });
+  currentSongKey = '';
+  emit(EVENTS.LYRICS_LOADED, { lyrics: [], songId: null, track: null });
 }
 
 export default {
@@ -91,3 +252,4 @@ export default {
   getCurrentLyricIndex,
   resetLyrics,
 };
+

@@ -1,15 +1,37 @@
 // 迷你播放栏 — 对应桌面端 .player-bar
-import React from 'react';
+import React, { useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Image } from 'react-native';
 import { useTheme } from '../theme/useTheme';
 import { PlayIcon, PauseIcon, NextIcon, HeartIcon } from './icons';
 import { usePlayerStore } from '../store/useStore';
 import { isFavorited as checkFavorited, toggleFavorite as toggleFav } from '../core/storage';
 
+// 封面缩略图：key=coverUri 重挂载时失败标记自动重置
+function CoverThumb({ uri, bg }) {
+  const [failed, setFailed] = useState(false);
+  if (!uri || failed) {
+    return (
+      <View style={[styles.cover, { backgroundColor: bg }]}>
+        <Text style={{ fontSize: 20 }}>🎵</Text>
+      </View>
+    );
+  }
+  return (
+    <View style={[styles.cover, { backgroundColor: bg, overflow: 'hidden' }]}>
+      <Image
+        source={{ uri }}
+        style={styles.coverImg}
+        resizeMode="cover"
+        onError={() => setFailed(true)}
+      />
+    </View>
+  );
+}
+
 export default function MiniPlayer({ onPress }) {
   const { colors } = useTheme();
 
-  const { playlist, currentIndex, isPlaying, isRoaming, roamIndex, roamPlaylist, favorites } = usePlayerStore();
+  const { playlist, currentIndex, isPlaying, isRoaming, roamIndex, roamPlaylist, favorites, currentCoverUrl } = usePlayerStore();
   const { togglePlay, playNext, setFavorites, setToast } = usePlayerStore();
 
   // Determine current track
@@ -22,6 +44,7 @@ export default function MiniPlayer({ onPress }) {
 
   if (!track) return null;
 
+  const coverUri = currentCoverUrl || track.picUrl || track.cover || null;
   const fav = checkFavorited(track, favorites);
 
   const handleFav = () => {
@@ -36,10 +59,8 @@ export default function MiniPlayer({ onPress }) {
       onPress={onPress}
       activeOpacity={0.9}
     >
-      {/* Cover placeholder */}
-      <View style={[styles.cover, { backgroundColor: colors.bgTertiary }]}>
-        <Text style={{ fontSize: 20 }}>🎵</Text>
-      </View>
+      {/* Cover（有封面显示图片，失败回落占位；key 切换自动重置） */}
+      <CoverThumb key={coverUri || 'none'} uri={coverUri} bg={colors.bgTertiary} />
 
       {/* Info */}
       <View style={styles.info}>
@@ -88,6 +109,10 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  coverImg: {
+    width: '100%',
+    height: '100%',
   },
   info: {
     flex: 1,

@@ -195,6 +195,7 @@ export function setFavoritesRef(favs) {
 let unsubPlaybackState = null;
 let unsubTrackChange = null;
 let unsubFavoriteState = null;
+let unsubCoverUpdate = null;
 
 function subscribeToEvents() {
   if (unsubPlaybackState) return;
@@ -230,12 +231,21 @@ function subscribeToEvents() {
   unsubFavoriteState = on(EVENTS.FAVORITE_STATE_CHANGE, (data) => {
     setFavoriteState(data.favorited);
   });
+
+  // cover:update → 封面异步补拉到位后刷新通知栏 artwork
+  unsubCoverUpdate = on(EVENTS.COVER_UPDATE, (data) => {
+    if (data && data.url && data.url !== notifArtworkUrl) {
+      notifArtworkUrl = data.url;
+      flushToNative();
+    }
+  });
 }
 
 function unsubscribeFromEvents() {
   if (unsubPlaybackState) { unsubPlaybackState(); unsubPlaybackState = null; }
   if (unsubTrackChange) { unsubTrackChange(); unsubTrackChange = null; }
   if (unsubFavoriteState) { unsubFavoriteState(); unsubFavoriteState = null; }
+  if (unsubCoverUpdate) { unsubCoverUpdate(); unsubCoverUpdate = null; }
 }
 
 export default {

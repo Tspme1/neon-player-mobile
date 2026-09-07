@@ -30,7 +30,7 @@ export default function FullPlayer({ visible, onClose, onQueuePress }) {
   const {
     playlist, currentIndex, isPlaying, playMode, isRoaming,
     roamIndex, roamPlaylist, favorites, lyricsData, currentLyricIndex,
-    position, duration, volume, isMuted
+    position, duration, volume, isMuted, currentCoverUrl
   } = store;
 
   const {
@@ -194,6 +194,24 @@ export default function FullPlayer({ visible, onClose, onQueuePress }) {
   } else if (currentIndex >= 0 && currentIndex < playlist.length) {
     track = playlist[currentIndex];
   }
+
+  // === 封面显示（渐入 + 失败回落占位） ===
+  // 最终封面：store 的 currentCoverUrl（搜索直出或异步补拉的结果）
+  const coverUri = currentCoverUrl || (track && (track.picUrl || track.cover)) || null;
+  const coverOpacity = useRef(new Animated.Value(0)).current;
+  const [coverFailed, setCoverFailed] = useState(false);
+  const [lastCoverKey, setLastCoverKey] = useState('');
+  const coverKey = ((track && (track.songId || track.id || track.name)) || '') + '|' + (coverUri || '');
+  if (coverKey !== lastCoverKey) {
+    setLastCoverKey(coverKey);
+    setCoverFailed(false); // 换歌/换封面时重置失败标记
+  }
+  useEffect(() => {
+    if (coverUri) {
+      coverOpacity.setValue(0);
+      Animated.timing(coverOpacity, { toValue: 1, duration: 300, useNativeDriver: true }).start();
+    }
+  }, [coverUri]);
 
   // === 右上角菜单 hooks（必须在 if (!track) return null 之前） ===
   const [menuVisible, setMenuVisible] = useState(false);
@@ -483,7 +501,16 @@ export default function FullPlayer({ visible, onClose, onQueuePress }) {
       {/* Cover */}
       <View style={styles.coverArea}>
         <View style={[styles.cover, { backgroundColor: colors.bgTertiary }]}>
-          <Text style={{ fontSize: 48 }}>🎵</Text>
+          {coverUri && !coverFailed ? (
+            <Animated.Image
+              source={{ uri: coverUri }}
+              style={[styles.coverImg, { opacity: coverOpacity }]}
+              resizeMode="cover"
+              onError={() => setCoverFailed(true)}
+            />
+          ) : (
+            <Text style={{ fontSize: 48 }}>🎵</Text>
+          )}
         </View>
       </View>
 
@@ -776,6 +803,11 @@ const styles = StyleSheet.create({
     height: COVER_SIZE,
     borderRadius: 12,
     alignItems: 'center', justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  coverImg: {
+    width: '100%',
+    height: '100%',
   },
   infoArea: {
     paddingHorizontal: 28,
