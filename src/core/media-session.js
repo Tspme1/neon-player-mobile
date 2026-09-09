@@ -10,6 +10,7 @@
 import { NativeModules, NativeEventEmitter } from 'react-native';
 import { EVENTS, on, off, emit } from './event-bus';
 import { loadSettings, saveSettings } from './storage';
+import logger from './logger';
 
 const MediaModule = NativeModules.MediaModule;
 const isAvailable = !!MediaModule;
@@ -119,14 +120,16 @@ export async function initMediaNotification(settingsData = null) {
     MediaModule.initMediaSession();
     MediaModule.setMediaNotificationEnabled(enabled);
     initialized = true;
+    logger.info('MediaSession', 'MediaNotification initialized', { enabled });
   } catch (e) {
-    console.error('[MediaSession] init error:', e);
+    logger.error('MediaSession', 'init error', e);
   }
 
   // 监听原生按钮事件 → emit event-bus
   if (!eventEmitter) {
     eventEmitter = new NativeEventEmitter(MediaModule);
     eventEmitter.addListener('MediaControlEvent', (eventName) => {
+      logger.info('MediaSession', 'MediaControlEvent received', { action: eventName });
       emit(EVENTS.PLAYBACK_CONTROL, { action: eventName });
     });
   }

@@ -12,6 +12,7 @@ import TrackItem from '../components/TrackItem';
 import EmptyState from '../components/EmptyState';
 import { PlusIcon } from '../components/icons';
 import ContextMenu from '../components/ContextMenu';
+import logger from '../core/logger';
 
 export default function LocalScreen() {
   const { colors } = useTheme();
@@ -89,13 +90,15 @@ export default function LocalScreen() {
           const updated = [...localLibrary, ...newTracks];
           setLocalLibrary(updated);
           await savePlaylist(updated);
+          logger.info('LocalScreen', 'handleAddFiles success', { count: newTracks.length });
           setToast(`已添加 ${newTracks.length} 首歌曲`);
         } else {
+          logger.warn('LocalScreen', 'handleAddFiles zero tracks');
           setToast('导入失败');
         }
       }
     } catch (e) {
-      console.error('handleAddFiles error:', e);
+      logger.error('LocalScreen', 'handleAddFiles error', e);
       setToast('添加文件失败');
     }
   };

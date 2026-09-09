@@ -1,11 +1,16 @@
 // 搜索框组件
 import React from 'react';
-import { View, TextInput, TouchableOpacity, Text, StyleSheet, Platform } from 'react-native';
+import { View, TextInput, TouchableOpacity, Text, StyleSheet, Platform, Keyboard } from 'react-native';
 import { useTheme } from '../theme/useTheme';
 import { SearchIcon } from './icons';
 
 export default function SearchBar({ value, onChangeText, onSubmit, placeholder = '搜索歌曲、歌手...' }) {
   const { colors } = useTheme();
+
+  const handleSubmit = () => {
+    Keyboard.dismiss();
+    if (onSubmit) onSubmit();
+  };
 
   return (
     <View style={[styles.container, { backgroundColor: colors.glassBg, borderColor: colors.border }]}>
@@ -17,9 +22,9 @@ export default function SearchBar({ value, onChangeText, onSubmit, placeholder =
         placeholder={placeholder}
         placeholderTextColor={colors.textMuted}
         returnKeyType="search"
-        onSubmitEditing={onSubmit}
+        onSubmitEditing={handleSubmit}
       />
-      <TouchableOpacity style={[styles.btn, { backgroundColor: colors.accent }]} onPress={onSubmit}>
+      <TouchableOpacity style={[styles.btn, { backgroundColor: colors.accent }]} onPress={handleSubmit}>
         <Text style={styles.btnText}>搜索</Text>
       </TouchableOpacity>
     </View>

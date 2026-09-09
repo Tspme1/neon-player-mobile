@@ -2,7 +2,7 @@
   "expo": {
     "name": "Neon Player",
     "slug": "tsp",
-    "version": "1.00.012",
+    "version": "1.00.013",
     "orientation": "portrait",
     "icon": "./assets/app-icon.png",
     "userInterfaceStyle": "automatic",
@@ -16,6 +16,7 @@
       "bundleIdentifier": "com.neon.player.mobile"
     },
     "android": {
+      "softwareKeyboardLayoutMode": "pan",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#e63946"

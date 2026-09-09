@@ -13,6 +13,7 @@ import { getLxLyricWebView } from '../services/lx-webview-manager';
 import { loadSettings } from './storage';
 import { EVENTS, emit } from './event-bus';
 import * as FileSystem from 'expo-file-system/legacy';
+import logger from './logger';
 
 // =====================================================================
 // 歌词状态（模块内部）
@@ -122,7 +123,7 @@ export async function fetchLyrics(trackOrSongId) {
       // 在线歌曲
       const platform = track._platform || track._src || 'netease';
       const songId = track.songId || track.id || track.songmid || track.hash;
-      console.log(`[LyricsEngine] fetchLyrics online: platform=${platform} songId=${songId}`);
+      logger.info('LyricsEngine', 'fetchLyrics online', { platform, songId });
 
       // 优先检测是否配置了 LX 自定义音源
       try {
@@ -133,16 +134,16 @@ export async function fetchLyrics(trackOrSongId) {
           const lxResult = await getLxLyricWebView(lxSourceId, track, platform);
           if (lxResult && lxResult.lrc) {
             lrcRes = lxResult;
-            console.log(`[LyricsEngine] LX lyric fetched successfully`);
+            logger.info('LyricsEngine', 'LX lyric fetched successfully');
           }
         }
       } catch (e) {
-        console.warn('[LyricsEngine] LX lyric attempt failed:', e.message);
+        logger.warn('LyricsEngine', 'LX lyric attempt failed', e?.message);
       }
 
       // 如果 LX 音源未提供歌词，回退至官方接口
       if (!lrcRes || !lrcRes.lrc) {
-        console.log(`[LyricsEngine] official lyric request for platform=${platform} songId=${songId}`);
+        logger.info('LyricsEngine', 'official lyric request', { platform, songId });
         if (platform === 'netease' && songId) {
           lrcRes = await neteaseLyrics(songId);
         } else if (platform === 'tencent') {
@@ -164,10 +165,11 @@ export async function fetchLyrics(trackOrSongId) {
       const title = track.name || track.title || '';
       const artist = track.artist || '';
       if (title) {
-        console.log(`[LyricsEngine] 专有源歌词缺失，启动跨源同名搜索兜底: ${title} - ${artist}`);
+        logger.info('LyricsEngine', 'Dedicated lyric missing, start fallback search', { title, artist });
         const fallbackRes = await searchFallbackLyrics(title, artist);
         if (fallbackRes && fallbackRes.lrc) {
           parsed = parseLyrics(fallbackRes.lrc, fallbackRes.tlyric);
+          logger.info('LyricsEngine', 'Fallback lyric matched and parsed', { lines: parsed.length });
         }
       }
     }
@@ -178,6 +180,7 @@ export async function fetchLyrics(trackOrSongId) {
     }
 
     lyricsData = parsed || [];
+    logger.info('LyricsEngine', 'Lyrics ready', { lines: lyricsData.length, key });
     currentLyricIndex = -1;
     currentSongKey = key;
 

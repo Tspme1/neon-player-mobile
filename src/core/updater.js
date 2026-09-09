@@ -1,6 +1,7 @@
 // APK 整包自更新服务 — 从 services/updater.js 复制，确认导入路径正确
 import { NativeModules, NativeEventEmitter, Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import logger from './logger';
 
 const { UpdaterModule } = NativeModules;
 const SKIPPED_VERSION_KEY = '@skipped_version';
@@ -37,9 +38,10 @@ export async function checkForUpdate() {
   try {
     const currentVC = await UpdaterModule.getVersionCode();
     const result = await UpdaterModule.checkUpdate(UPDATE_URL, currentVC);
+    logger.info('Updater', 'checkForUpdate checked', { currentVC, hasUpdate: result?.hasUpdate, newVC: result?.versionCode });
     return result;
   } catch (e) {
-    console.error('[Updater] checkForUpdate error:', e);
+    logger.error('Updater', 'checkForUpdate error', e);
     return null;
   }
 }
@@ -52,12 +54,14 @@ export async function checkForUpdate() {
  */
 export async function downloadApk(url, onProgress) {
   if (!UpdaterModule) throw new Error('UpdaterModule 不可用');
+  logger.info('Updater', 'downloadApk start', { url });
 
   // 监听下载进度
   let progressSub = null;
   if (eventEmitter && onProgress) {
     progressSub = eventEmitter.addListener('updateDownloadProgress', (progress) => {
       if (progress === -1) {
+        logger.error('Updater', 'downloadApk failed event received');
         onProgress(-1); // 安装失败
       } else {
         onProgress(progress);
@@ -67,6 +71,7 @@ export async function downloadApk(url, onProgress) {
 
   try {
     const path = await UpdaterModule.downloadApk(url);
+    logger.info('Updater', 'downloadApk finished', { path });
     return path;
   } finally {
     if (progressSub) progressSub.remove();
@@ -78,6 +83,7 @@ export async function downloadApk(url, onProgress) {
  * @param {string} filePath 本地 APK 文件路径
  */
 export function installApk(filePath) {
+  logger.info('Updater', 'installApk requested', { filePath });
   if (!UpdaterModule) throw new Error('UpdaterModule 不可用');
   UpdaterModule.installApk(filePath);
 }

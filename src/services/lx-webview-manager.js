@@ -231,7 +231,7 @@ export async function initLxSource(sourceId) {
 }
 
 // ====== 请求音乐 URL ======
-export async function getLxMusicUrlWebView(sourceId, songId, quality = '128k', platform = 'netease') {
+export async function getLxMusicUrlWebView(sourceId, songId, quality = '128k', platform = 'netease', song = null) {
   const _t0 = Date.now();
   const _log = (label) => console.log(`[DBG] +${Date.now() - _t0}ms [webview] ${label}`);
   _log(`start: sourceId=${sourceId} songId=${songId} quality=${quality} platform=${platform}`);
@@ -253,14 +253,24 @@ export async function getLxMusicUrlWebView(sourceId, songId, quality = '128k', p
   };
   const lxSource = lxSourceMap[platform] || 'wy';
 
+  const rawStr = String(songId || (song && (song.songId || song.id)) || '');
+  const cleanHash = (rawStr.includes('|') ? rawStr.split('|')[0] : rawStr).toUpperCase();
+  const cleanRid = rawStr.replace('MUSIC_', '');
+  const songName = (song && (song.name || song.title)) || '';
+  const songArtist = (song && (song.artist || (song.artists && song.artists.map(a => a.name).join(', ')))) || '';
+
   const musicInfo = {
-    id: `${lxSource}_${songId}`,
+    id: lxSource === 'kg' ? cleanHash : (lxSource === 'kw' ? cleanRid : rawStr),
     source: lxSource,
-    meta: { songId: String(songId), albumId: '', albumName: '' },
-    songmid: String(songId),
-    hash: String(songId),
-    name: '',
-    singer: '',
+    meta: {
+      songId: lxSource === 'kw' ? cleanRid : (lxSource === 'kg' ? cleanHash : rawStr),
+      albumId: (song && song.albumId) || '',
+      albumName: (song && (song.album || (song.al && song.al.name))) || '',
+    },
+    songmid: lxSource === 'kw' ? cleanRid : (lxSource === 'kg' ? cleanHash : rawStr),
+    hash: lxSource === 'kg' ? cleanHash : rawStr,
+    name: songName,
+    singer: songArtist,
   };
 
   const qualities = [quality, '128k', '320k'];

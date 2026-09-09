@@ -2,6 +2,7 @@
 // 从 services/file-cache.js 重构：移除 formatCacheSize（移到 utils）
 import * as FileSystem from 'expo-file-system/legacy';
 import { NativeModules } from 'react-native';
+import logger from './logger';
 
 // 使用 documentDirectory 而非 cacheDirectory，确保应用退出后缓存仍然保留
 const CACHE_DIR = FileSystem.documentDirectory + 'music-cache/';
@@ -193,9 +194,12 @@ export async function clearCache() {
     for (const file of files) {
       await FileSystem.deleteAsync(dir + file, { idempotent: true });
     }
+    // 联动清除运行日志
+    await logger.clearLogs();
+    logger.info('CacheManager', 'Cache and logs cleared completely');
     return true;
   } catch (e) {
-    console.error('[CacheManager] clearCache error:', e.message);
+    logger.error('CacheManager', 'clearCache error', e);
     return false;
   }
 }

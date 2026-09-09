@@ -77,7 +77,7 @@ export function toggleFavorite(track, favorites) {
   } else {
     favorites.push({
       id: id,
-      type: track.type || 'local',
+      type: track.type || (track.path && (!track.songId || String(track.songId).startsWith('local_')) ? 'local' : 'online'),
       path: track.path || '',
       name: track.name || '',
       songId: track.songId || track.id || null,
@@ -86,6 +86,9 @@ export function toggleFavorite(track, favorites) {
       duration: track.duration || 0,
       fee: track.fee || 0,
       _src: track._src || null,
+      _platform: track._platform || track._src || undefined,
+      picUrl: track.picUrl || track.pic || track.coverUrl || track.cover || '',
+      pic: track.pic || track.picUrl || track.coverUrl || track.cover || '',
       favoritedAt: Date.now(),
     });
   }
@@ -349,7 +352,9 @@ export function addTrackToPlaylistData(playlist, track) {
     duration: track.duration || 0,
     fee: track.fee || 0,
     _src: track._src || null,
-    _platform: track._platform || (trackType === 'online' ? 'netease' : undefined),
+    _platform: track._platform || (trackType === 'online' ? (track._src || 'netease') : undefined),
+    picUrl: track.picUrl || track.pic || track.coverUrl || track.cover || '',
+    pic: track.pic || track.picUrl || track.coverUrl || track.cover || '',
     addedAt: Date.now(),
   });
   playlist.updatedAt = Date.now();

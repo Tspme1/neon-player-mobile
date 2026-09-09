@@ -310,6 +310,30 @@ class MediaModule(reactContext: ReactApplicationContext) :
     fun setSkipAudioFocus(skip: Boolean) {
         Log.d("MediaModule", "[setSkipAudioFocus] skip=$skip (handled in JS layer)")
     }
+
+    // === High-performance native log append without loading entire file into JS memory ===
+    @ReactMethod
+    fun appendToFile(filePath: String, content: String, promise: Promise) {
+        try {
+            val cleanPath = if (filePath.startsWith("file://")) {
+                filePath.substring(7)
+            } else {
+                filePath
+            }
+            val file = java.io.File(cleanPath)
+            file.parentFile?.mkdirs()
+            java.io.FileOutputStream(file, true).use { fos ->
+                java.io.OutputStreamWriter(fos, "UTF-8").use { writer ->
+                    writer.write(content)
+                    writer.flush()
+                }
+            }
+            promise.resolve(true)
+        } catch (e: Exception) {
+            Log.e("MediaModule", "[appendToFile] error: ${e.message}")
+            promise.reject("APPEND_ERROR", e.message)
+        }
+    }
 }
 
 /**

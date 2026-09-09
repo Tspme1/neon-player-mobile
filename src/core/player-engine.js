@@ -4,13 +4,17 @@
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
 import { NativeModules, AppState } from 'react-native';
+import logger from './logger';
 import { EVENTS, emit, on } from './event-bus';
 import {
+  detectPlatform,
   musicSongUrl,
+  resolvePlayableUrlCascade,
   neteaseSongUrl,
   neteaseShuffleSongs,
   neteaseLyrics,
   neteaseSongPic,
+  fetchOnlineSongPic,
 } from './source-manager';
 import { extractLocalCover } from '../utils/id3-cover';
 import {
@@ -168,14 +172,23 @@ function setupPlaybackStatusUpdate() {
       const currentTimeSec = (status.positionMillis || 0) / 1000;
       updateHighlight(currentTimeSec);
 
-      // 自动播放下一首
+      // 自动播放下一首或单曲循环
       if (status.didJustFinish) {
-        if (soundObject) {
-          soundObject.setOnPlaybackStatusUpdate(null);
-        }
         if (playMode === 'repeat-one') {
-          if (soundObject) soundObject.replayAsync();
+          logger.info('PlayerEngine', 'repeat-one didJustFinish, replaying');
+          position = 0;
+          isPlaying = true;
+          emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: true, position: 0, duration });
+          updateHighlight(0);
+          if (soundObject) {
+            soundObject.replayAsync().catch(e => {
+              logger.error('PlayerEngine', 'replayAsync error', e);
+            });
+          }
         } else {
+          if (soundObject) {
+            soundObject.setOnPlaybackStatusUpdate(null);
+          }
           playNext();
         }
       }
@@ -326,12 +339,14 @@ async function resolveLocalAudioUri(track) {
 
 export async function togglePlay() {
   if (currentIndex === -1 && playlist.length > 0) {
+    logger.info('PlayerEngine', 'togglePlay: start from index 0');
     await playTrack(0);
     return;
   }
 
   const wasPlaying = isPlaying;
   userPaused = wasPlaying; // track user intent
+  logger.info('PlayerEngine', 'togglePlay intent', { wasPlaying, currentIndex });
   try {
     if (soundObject) {
       if (wasPlaying) {
@@ -349,7 +364,7 @@ export async function togglePlay() {
       return;
     }
   } catch (e) {
-    console.error('[PlayerEngine] togglePlay error:', e);
+    logger.error('PlayerEngine', 'togglePlay error', e);
     // 若 playAsync 失败（如音频已被系统中断卸载），尝试重新加载该曲目
     if (!wasPlaying && currentIndex >= 0 && currentIndex < playlist.length) {
       try {
@@ -391,14 +406,8 @@ function notifyTrackCover(track) {
         const uri = await resolveLocalAudioUri(track);
         if (uri) url = await extractLocalCover(uri) || '';
       } else {
-        // 在线歌曲：平台检测逻辑与 playOnlineSong 保持一致
-        const source = track._src || track._platform || currentSource || 'netease';
-        const platform = track._platform || (String(source).startsWith('lx:') ? 'netease' : source);
-        if (platform === 'netease' && (track.songId || track.id)) {
-          url = await neteaseSongPic(track.songId || track.id);
-        }
-        // 腾讯/酷狗/酷我：搜索已直出 picUrl，此处无需补拉；
-        // 老版本播放列表条目缺字段时维持占位图（不做搜索模糊匹配，避免错封面）
+        // 在线歌曲：全平台补拉入口（包含网易云、QQ音乐、酷狗、同名兜底）
+        url = await fetchOnlineSongPic(track);
       }
       if (!url) return;
 
@@ -423,6 +432,7 @@ export async function playTrack(index) {
   const track = playlist[index];
   currentIndex = index;
   if (isRoaming) roamIndex = index;
+  logger.info('PlayerEngine', 'playTrack start', { index, title: track?.title, artist: track?.artist, type: track?.type });
 
   // 立即 emit TRACK_CHANGE 和 STATE_CHANGE，让 UI 即时显示新曲目信息并置为暂停等待
   isPlaying = false;
@@ -443,6 +453,7 @@ export async function playTrack(index) {
   try {
     const playUri = await resolveLocalAudioUri(track);
     if (!playUri) {
+      logger.warn('PlayerEngine', 'resolveLocalAudioUri failed for local track', { path: track.path });
       showToast('本地文件不存在或无法访问');
       isPlaying = false;
       emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track, index, isPlaying: false, isRoaming });
@@ -450,19 +461,20 @@ export async function playTrack(index) {
       return;
     }
     soundObject = new Audio.Sound();
-    await soundObject.loadAsync({ uri: playUri });
+    await soundObject.loadAsync({ uri: playUri }, { isLooping: playMode === 'repeat-one' });
     await soundObject.setVolumeAsync(volume);
     setupPlaybackStatusUpdate();
     await soundObject.playAsync();
     isPlaying = true;
     currentOnlineSong = null;
+    logger.info('PlayerEngine', 'local track playing', { title: track.title, uri: playUri });
     emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track, index, isPlaying: true, isRoaming });
     emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: true, position: 0, duration: track.duration || 0 });
 
     // 获取本地音乐歌词（读取同名 .lrc 或跨源搜索同名歌词兜底）
     fetchLyrics(track);
   } catch (e) {
-    console.error('[PlayerEngine] playTrack error:', e);
+    logger.error('PlayerEngine', 'playTrack error', e);
     showToast('播放失败');
     isPlaying = false;
     emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track, index, isPlaying: false, isRoaming });
@@ -476,15 +488,13 @@ export async function playOnlineSong(song, queueIndex = -1) {
 
   const songId = song.songId || song.id;
   if (!songId) {
+    logger.warn('PlayerEngine', 'playOnlineSong aborted: missing songId', song);
     showToast('无法播放:缺少歌曲ID');
     return;
   }
 
-  const source = song._src || song._platform || currentSource || (queueSource || 'netease');
-  // 从 song 中提取平台信息（双轴模式）
-  const platform = song._platform || (source.startsWith('lx:') ? 'netease' : source);
-  const apiSource = source.startsWith('lx:') ? source :
-    (['netease', 'tencent', 'kuwo', 'kugou'].includes(source) ? source : 'netease');
+  // 智能识别平台（彻底摆脱 source 为 lx: 时被误判为 netease）
+  const platform = detectPlatform(song);
 
   let targetIndex = queueIndex;
   if (targetIndex < 0) {
@@ -497,7 +507,10 @@ export async function playOnlineSong(song, queueIndex = -1) {
 
   // ===== [DBG] 播放链路计时 =====
   const _dbgT0 = Date.now();
-  const _dbgLog = (label) => console.log(`[DBG] +${Date.now() - _dbgT0}ms ${label}`);
+  const _dbgLog = (label) => {
+    const elapsed = Date.now() - _dbgT0;
+    logger.info('PlayerEngine', `+${elapsed}ms ${label}`);
+  };
   // 双轴模式：从 settings 获取 playSource，决定用哪个音源获取 URL
   const settings = await loadSettings();
   const playSource = settings.playSource || 'official';
@@ -525,39 +538,41 @@ export async function playOnlineSong(song, queueIndex = -1) {
   }
   const hasFileCache = !!cachedFilePath;
 
-  // 卸载旧音频与获取 URL 并行
+  // 卸载旧音频与获取 URL 并行（多音源级联自动切换）
   let urlPromise = null;
   if (!songUrlData) {
     if (!hasFileCache) {
       showToast('正在获取歌曲链接...');
     }
-    _dbgLog('musicSongUrl start');
-    urlPromise = Promise.race([
-      musicSongUrl(playSource, { ...song, songId, _platform: platform }),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('获取链接超时(30s)')), 30000)
-      ),
-    ]).then(r => { _dbgLog(`musicSongUrl done: ${r ? 'has url' : 'null'}`); return r; }).catch(() => null);
+    _dbgLog('resolvePlayableUrlCascade start');
+    const quality = settings.musicQuality || 'standard';
+    urlPromise = resolvePlayableUrlCascade(
+      { ...song, songId, _platform: platform },
+      playSource,
+      quality
+    );
   }
 
   if (urlPromise) {
-    songUrlData = await urlPromise;
+    const cascadeResult = await urlPromise;
+    if (cascadeResult && cascadeResult.url) {
+      songUrlData = { url: cascadeResult.url, isLocal: cascadeResult.isLocal || false };
+      if (cascadeResult.switched) {
+        showToast(`已自动切换至「${cascadeResult.sourceName || '备用音源'}」播放`);
+      }
+    } else {
+      songUrlData = null;
+    }
   }
   if (!songUrlData || !songUrlData.url) {
-      // LX 音源失败：直接报错，不回退官方 API（用户要求）
-      const fee = song.fee || 0;
-      if (playSource.startsWith('lx:')) {
-        showToast('⚠️ 当前播放音源获取失败，请切换播放音源');
-        _dbgLog('ABORT: LX playSource failed, no fallback');
-      } else {
-        showToast(fee === 1 || fee === 8 ? '此歌曲为 VIP 专享,无法播放' : '无法获取歌曲链接');
-        _dbgLog('ABORT: no url');
-      }
-      isPlaying = false;
-      emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track: song, index: targetIndex, isPlaying: false, isRoaming: isRoaming || queueSource === 'roam' });
-      notifyTrackCover(song);
-      emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position: 0, duration: 0 });
-      return;
+    const fee = song.fee || 0;
+    showToast(fee === 1 || fee === 8 ? '此歌曲为 VIP 专享，所有音源均无法播放' : '当前音源及备用音源均无法播放此歌曲');
+    _dbgLog('ABORT: all sources cascade failed');
+    isPlaying = false;
+    emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track: song, index: targetIndex, isPlaying: false, isRoaming: isRoaming || queueSource === 'roam' });
+    notifyTrackCover(song);
+    emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position: 0, duration: 0 });
+    return;
   }
   setCachedUrl(cacheKey, songUrlData);
 
@@ -607,18 +622,35 @@ export async function playOnlineSong(song, queueIndex = -1) {
       ? 'file:///' + songUrlData.url.replace(/\\/g, '/')
       : playUri;
 
+    const isRepeatOne = playMode === 'repeat-one';
     const loadStart = Date.now();
     _dbgLog('loadAsync start');
     try {
-      await soundObject.loadAsync({ uri });
+      const status = await soundObject.loadAsync({ uri }, { isLooping: isRepeatOne });
       _dbgLog(`loadAsync done: ${Date.now() - loadStart}ms`);
+      // 检测酷我官方等接口返回的 11 秒假音频（防盗/VIP语音提示音频）
+      if (status && status.isLoaded && status.durationMillis) {
+        const expectedSec = parseInt(song.duration || 0);
+        if (status.durationMillis <= 15000 && expectedSec > 30) {
+          logger.warn('PlayerEngine', `Detected fake promo audio (${status.durationMillis}ms vs expected ${expectedSec}s)`);
+          await soundObject.unloadAsync();
+          soundObject = null;
+          throw new Error('检测到假试听音频');
+        }
+      }
     } catch (loadErr) {
       // 文件缓存可能损坏，删除后用原始 URL 重试
-      if (usedFileCache) {
+      if (usedFileCache && !loadErr.message?.includes('假试听音频')) {
         await deleteCachedFile(platform, songId);
         await soundObject.unloadAsync();
         soundObject = new Audio.Sound();
-        await soundObject.loadAsync({ uri: songUrlData.url });
+        const status = await soundObject.loadAsync({ uri: songUrlData.url }, { isLooping: isRepeatOne });
+        if (status && status.isLoaded && status.durationMillis && status.durationMillis <= 15000 && parseInt(song.duration || 0) > 30) {
+          logger.warn('PlayerEngine', `Detected fake promo audio on fallback (${status.durationMillis}ms)`);
+          await soundObject.unloadAsync();
+          soundObject = null;
+          throw new Error('检测到假试听音频');
+        }
       } else {
         throw loadErr;
       }
@@ -655,7 +687,7 @@ export async function playOnlineSong(song, queueIndex = -1) {
     }
   } catch (e) {
     console.error('[PlayerEngine] playOnlineSong error:', e);
-    showToast('播放失败');
+    showToast(e.message?.includes('假试听音频') ? '检测到试听或防盗音频，跳过播放' : '播放失败');
     isPlaying = false;
     emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track: song, index: targetIndex, isPlaying: false, isRoaming: isRoaming || queueSource === 'roam' });
     notifyTrackCover(song);
@@ -703,6 +735,9 @@ export function cyclePlayMode() {
   const currentIdx = modes.indexOf(playMode);
   playMode = modes[(currentIdx + 1) % modes.length];
   showToast(labels[playMode]);
+  if (soundObject) {
+    soundObject.setIsLoopingAsync(playMode === 'repeat-one').catch(() => {});
+  }
   loadSettings().then(settings => {
     settings.playMode = playMode;
     saveSettings(settings);
@@ -716,6 +751,9 @@ export function getPlayMode() {
 
 export function setPlayMode(mode) {
   playMode = mode;
+  if (soundObject) {
+    soundObject.setIsLoopingAsync(playMode === 'repeat-one').catch(() => {});
+  }
 }
 
 // =====================================================================
@@ -840,6 +878,7 @@ export function getRoamIndex() {
 // =====================================================================
 
 export async function seekTo(positionMs) {
+  logger.info('PlayerEngine', 'seekTo', { positionMs });
   if (soundObject) {
     await soundObject.setPositionAsync(positionMs);
   }
@@ -907,6 +946,7 @@ export function initPlayerEngine() {
   if (controlUnsub) return;
   controlUnsub = on(EVENTS.PLAYBACK_CONTROL, (data) => {
     const { action } = data;
+    logger.info('PlayerEngine', 'control action received', { action });
     switch (action) {
       case 'play':
         if (!isPlaying) togglePlay();

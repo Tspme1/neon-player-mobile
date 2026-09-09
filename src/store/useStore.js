@@ -16,6 +16,7 @@ import {
 import { getCacheSize, clearCache } from '../core/cache-manager';
 import { formatCacheSize } from '../utils/format';
 import { waitForSandboxReady, initLxSource } from '../services/lx-webview-manager';
+import logger from '../core/logger';
 
 // =====================================================================
 // Store 定义
@@ -470,7 +471,53 @@ export function initStore() {
   // cover:update → 更新当前曲目封面（切歌时引擎必发一次，含空值清场）
   on(EVENTS.COVER_UPDATE, (data) => {
     if (data && data.url !== undefined) {
-      usePlayerStore.setState({ currentCoverUrl: data.url || null });
+      const coverUrl = data.url || null;
+      usePlayerStore.setState({ currentCoverUrl: coverUrl });
+
+      // 如果补拉到了有效封面，自动同步写回 favorites 和 customPlaylists，持久化修复缺失封面
+      if (coverUrl && data.key) {
+        const { favorites, customPlaylists } = usePlayerStore.getState();
+        let favUpdated = false;
+        const newFavs = favorites.map(f => {
+          const fKey = f.songId || f.id || f.path;
+          if (fKey === data.key || ('online_' + fKey) === data.key || fKey === ('online_' + data.key)) {
+            if (!f.picUrl || f.picUrl !== coverUrl) {
+              favUpdated = true;
+              return { ...f, picUrl: coverUrl, pic: coverUrl };
+            }
+          }
+          return f;
+        });
+        if (favUpdated) {
+          usePlayerStore.setState({ favorites: newFavs });
+          saveFavorites(newFavs);
+        }
+
+        let cpUpdated = false;
+        const newPlaylists = customPlaylists.map(pl => {
+          if (!pl.tracks) return pl;
+          let trackUpdated = false;
+          const updatedTracks = pl.tracks.map(t => {
+            const tKey = t.songId || t.id || t.path;
+            if (tKey === data.key || ('online_' + tKey) === data.key || tKey === ('online_' + data.key)) {
+              if (!t.picUrl || t.picUrl !== coverUrl) {
+                trackUpdated = true;
+                return { ...t, picUrl: coverUrl, pic: coverUrl };
+              }
+            }
+            return t;
+          });
+          if (trackUpdated) {
+            cpUpdated = true;
+            return { ...pl, tracks: updatedTracks, updatedAt: Date.now() };
+          }
+          return pl;
+        });
+        if (cpUpdated) {
+          usePlayerStore.setState({ customPlaylists: newPlaylists });
+          saveCustomPlaylists(newPlaylists);
+        }
+      }
     }
   });
 
@@ -522,6 +569,14 @@ export async function initApp() {
     loadPlaylist(),
   ]);
 
+  logger.info('Store:initApp', 'settings and storage hydrated', {
+    favsCount: favs?.length || 0,
+    customPlaylistsCount: customPlaylists?.length || 0,
+    savedPlaylistCount: savedPlaylist?.length || 0,
+    currentSource: settings.currentSource,
+    playSource: settings.playSource,
+  });
+
   usePlayerStore.getState().setFavorites(favs);
   usePlayerStore.setState({ customPlaylists });
   const src = settings.currentSource || settings.searchSource || 'netease';
@@ -543,6 +598,7 @@ export async function initApp() {
   // 5.5 预初始化 LX 沙箱（如果播放音源是 LX）
   if (playSrc.startsWith('lx:')) {
     const sourceId = playSrc.slice(3);
+    logger.info('Store:initApp', 'LX source detected, warming sandbox', { sourceId });
     // 等 WebView 就绪（最多 5 秒），不阻塞主流程
     waitForSandboxReady(5000).then(ready => {
       if (ready) {
@@ -571,4 +627,5 @@ export async function initApp() {
       .then(() => {})
       .catch(() => {});
   }
+  logger.info('Store:initApp', 'initApp fully completed');
 }

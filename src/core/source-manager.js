@@ -14,6 +14,7 @@ import { getLxMusicUrl } from '../services/lx-runner';
 
 // Storage
 import { KEYS, getCachedUrl, setCachedUrl } from './storage';
+import logger from './logger';
 
 // =====================================================================
 // 内置音源 API
@@ -23,12 +24,14 @@ import { KEYS, getCachedUrl, setCachedUrl } from './storage';
 // LX 音源脚本最终成功的是第三个 API: music-api.gdstudio.xyz
 // 这个 API 返回完整 URL (非 30 秒试听), 可以在原生 OkHttp 层直接请求
 async function nativeLxMusicUrl(songId, platform = 'netease', quality = 'standard') {
+  // gdstudio.xyz 和 cenguigui 仅稳定支持网易云，其他平台（酷狗、酷我、腾讯等）直接进 WebView 沙箱，避免浪费数秒网络超时
+  if (platform !== 'netease') {
+    return null;
+  }
   const _t0 = Date.now();
-  const _log = (label) => console.log(`[DBG] +${Date.now() - _t0}ms [nativeLx] ${label}`);
+  const _log = (label) => logger.info('SourceManager:nativeLx', `+${Date.now() - _t0}ms ${label}`);
   _log(`start songId=${songId} platform=${platform} quality=${quality}`);
-  // gdstudio API 支持的 source 名称映射
-  const sourceMap = { netease: 'netease', tencent: 'tencent', kuwo: 'kuwo', kugou: 'kugou' };
-  const src = sourceMap[platform] || 'netease';
+  const src = 'netease';
   // 音质映射到 bitrate
   const brMap = { low: 128, standard: 320, high: 320, lossless: 320 };
   const br = brMap[quality] || 320;
@@ -224,7 +227,7 @@ function decodeBase64(str) {
 // === QQ音乐/腾讯歌词 (参考 lx-music-mobile) ===
 async function tencentLyrics(songmid) {
   if (!songmid) return { lrc: '', tlyric: '' };
-  console.log(`[SourceManager] tencentLyrics start: ${songmid}`);
+  logger.info('SourceManager', 'tencentLyrics start', { songmid });
   try {
     const url = `https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=${songmid}&g_tk=5381&loginUin=0&hostUin=0&format=json&inCharset=utf8&outCharset=utf-8&platform=yqq`;
     const headers = {
@@ -238,7 +241,6 @@ async function tencentLyrics(songmid) {
       const res = await fetch(url, { headers });
       text = await res.text();
     }
-    console.log(`[SourceManager] tencentLyrics response len: ${text ? text.length : 0}`);
     if (text) {
       let cleanText = text.trim();
       const m = cleanText.match(/^[a-zA-Z_0-9$]+\s*\(([\s\S]*)\)\s*;?$/);
@@ -249,14 +251,14 @@ async function tencentLyrics(songmid) {
         const rawTlyric = decodeBase64(parsed.trans || '');
         const lrc = decodeHtmlEntities(rawLrc);
         const tlyric = decodeHtmlEntities(rawTlyric);
-        console.log(`[SourceManager] tencentLyrics success, lrc lines: ${lrc ? lrc.split('\n').length : 0}`);
+        logger.info('SourceManager', 'tencentLyrics success', { lines: lrc ? lrc.split('\n').length : 0 });
         return { lrc, tlyric };
       } else {
-        console.warn(`[SourceManager] tencentLyrics non-zero code: ${parsed ? parsed.code : 'unknown'}`);
+        logger.warn('SourceManager', 'tencentLyrics non-zero code', parsed?.code);
       }
     }
   } catch (e) {
-    console.error('[SourceManager] tencentLyrics error:', e.message);
+    logger.error('SourceManager', 'tencentLyrics error', e);
   }
   return { lrc: '', tlyric: '' };
 }
@@ -560,8 +562,13 @@ async function kuwoSearch(keyword, page = 0, limit = 30) {
   }
 }
 
-async function kuwoSongUrl(songId) {
+async function kuwoSongUrl(songId, song = null) {
   try {
+    // 过滤 VIP 曲目：酷我官方 antiserver 对 VIP 歌曲仅返回 11 秒提示语音（"该歌曲为VIP专享，请在酷我音乐客户端试听"）
+    if (song && (song.fee === 1 || song.fee === 8)) {
+      logger.warn('SourceManager:kuwo', `Skipping VIP song (${songId}) on official kuwo API to prevent 11s promo audio`);
+      return null;
+    }
     // 使用 antiserver 接口，不需要 cookie
     const url = `https://antiserver.kuwo.cn/anti.s?type=convert_url&format=mp3&response=url&rid=${songId}`;
     const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Referer': 'https://www.kuwo.cn/' };
@@ -645,6 +652,42 @@ async function kugouSongUrl(songId) {
   }
 }
 
+const kugouPicCache = new Map();
+async function kugouSongPic(songId, track = null) {
+  try {
+    const rawId = (track && (track.hash || track.songId || track.id)) || songId || '';
+    const hash = String(rawId).split('|')[0];
+    if (!hash || hash.length < 32) return '';
+    if (kugouPicCache.has(hash)) return kugouPicCache.get(hash);
+
+    const url = `https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=${hash}`;
+    const headers = { 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15', 'Referer': 'https://m.kugou.com/' };
+    let text = '';
+    if (NativeModules.MediaModule && NativeModules.MediaModule.nativeHttpGet) {
+      text = await NativeModules.MediaModule.nativeHttpGet(url, JSON.stringify(headers));
+    } else {
+      const res = await fetch(url, { headers });
+      text = await res.text();
+    }
+    const parsed = JSON.parse(text);
+    let img = parsed.album_img || parsed.imgUrl || '';
+    if (img) {
+      img = img.replace('{size}', '400');
+    }
+    kugouPicCache.set(hash, img);
+    if (kugouPicCache.size > 300) {
+      let drop = kugouPicCache.size - 200;
+      for (const k of kugouPicCache.keys()) {
+        if (drop-- <= 0) break;
+        kugouPicCache.delete(k);
+      }
+    }
+    return img;
+  } catch {
+    return '';
+  }
+}
+
 // === 咪咕 ===
 
 async function miguSearch(keyword, limit = 30) {
@@ -709,39 +752,144 @@ async function miguSongUrl(songId, song) {
 
 async function tencentSearch(keyword, page = 0, limit = 30) {
   try {
-    const url = `https://c.y.qq.com/soso/fcgi-bin/client_search_cp?w=${encodeURIComponent(keyword)}&format=json&n=${limit}&p=${page + 1}&cr=1&g_tk=5381&t=0&loginUin=0&platform=yqq&needNewCode=0`;
-    const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Referer': 'https://y.qq.com/' };
-    let parsed;
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'Referer': 'https://y.qq.com/',
+    };
+
+    // 方案 1 (首选)：现役稳定免签搜索接口 search_for_qq_cp
+    // 实测无风控限制（相较于被废弃的 client_search_cp 与易触发 code:2001 风控的 musicu.fcg，该接口非常稳定且支持分页）
+    const searchUrl = `https://c.y.qq.com/soso/fcgi-bin/search_for_qq_cp?w=${encodeURIComponent(keyword)}&format=json&n=${limit}&p=${page + 1}`;
+    let songList = null;
+
     try {
+      let text = '';
       if (NativeModules.MediaModule && NativeModules.MediaModule.nativeHttpGet) {
-        const text = await NativeModules.MediaModule.nativeHttpGet(url, JSON.stringify(headers));
-        parsed = JSON.parse(text);
+        text = await NativeModules.MediaModule.nativeHttpGet(searchUrl, JSON.stringify(headers));
       } else {
-        const res = await fetch(url, { headers });
-        parsed = await res.json();
+        const res = await fetch(searchUrl, { headers });
+        text = await res.text();
       }
-    } catch {
-      const res = await fetch(url, { headers });
-      parsed = await res.json();
+      let parsed = null;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        const jsonMatch = text.match(/^[a-zA-Z_0-9\$\.]+\s*\(([\s\S]*)\)\s*;?$/);
+        if (jsonMatch) parsed = JSON.parse(jsonMatch[1]);
+      }
+      if (parsed && parsed.data && parsed.data.song && Array.isArray(parsed.data.song.list) && parsed.data.song.list.length > 0) {
+        songList = parsed.data.song.list;
+      }
+    } catch (e) {
+      logger.warn('SourceManager:tencentSearch', 'search_for_qq_cp request error', e.message);
     }
-    const songs = ((parsed.data && parsed.data.song && parsed.data.song.list) || []).map(s => ({
-      id: s.songmid || '',
-      name: s.songname || '',
-      artist: (s.singer || []).map(a => a.name || '').join(' / '),
-      album: (s.albumname || s.album && s.album.name) || '',
-      duration: parseInt(s.interval || 0),
-      fee: s.pay && s.pay.payplay ? 1 : 0,
-      _src: 'tencent',
-      // 封面：lx-music 同款拼接公式（实测 200/33KB@300px，无 Referer 也可加载）
-      // T002=专辑图；无专辑 mid 时降级 T001=歌手图
-      picUrl: s.albummid
-        ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${s.albummid}.jpg`
-        : (s.singer && s.singer[0] && s.singer[0].mid
-          ? `https://y.gtimg.cn/music/photo_new/T001R300x300M000${s.singer[0].mid}.jpg`
-          : ''),
-    }));
+
+    // 方案 2 (备用)：若首选接口无结果，降级尝试 musicu.fcg (DoSearchForQQMusicDesktop)
+    if (!songList || songList.length === 0) {
+      try {
+        const payload = {
+          req: {
+            method: 'DoSearchForQQMusicDesktop',
+            module: 'music.search.SearchCgiService',
+            param: {
+              search_type: 0,
+              query: keyword,
+              page_num: page + 1,
+              num_per_page: Math.min(limit, 10),
+            },
+          },
+        };
+        const musicuUrl = `https://u.y.qq.com/cgi-bin/musicu.fcg?format=json&data=${encodeURIComponent(JSON.stringify(payload))}`;
+        let text = '';
+        if (NativeModules.MediaModule && NativeModules.MediaModule.nativeHttpGet) {
+          text = await NativeModules.MediaModule.nativeHttpGet(musicuUrl, JSON.stringify(headers));
+        } else {
+          const res = await fetch(musicuUrl, { headers });
+          text = await res.text();
+        }
+        const mParsed = JSON.parse(text);
+        const mList = mParsed?.req?.data?.body?.song?.list;
+        if (mList && mList.length > 0) {
+          songList = mList;
+        }
+      } catch {}
+    }
+
+    // 方案 3 (兜底)：若仍无结果，尝试 smartbox_new.fcg 联想热搜兜底
+    if (!songList || songList.length === 0) {
+      try {
+        const smartUrl = `https://c.y.qq.com/splcloud/fcgi-bin/smartbox_new.fcg?key=${encodeURIComponent(keyword)}&format=json`;
+        let text = '';
+        if (NativeModules.MediaModule && NativeModules.MediaModule.nativeHttpGet) {
+          text = await NativeModules.MediaModule.nativeHttpGet(smartUrl, JSON.stringify(headers));
+        } else {
+          const res = await fetch(smartUrl, { headers });
+          text = await res.text();
+        }
+        const sParsed = JSON.parse(text);
+        const sItemList = sParsed?.data?.song?.itemlist;
+        if (sItemList && sItemList.length > 0) {
+          return sItemList.map(s => ({
+            id: s.mid || s.docid || '',
+            name: s.name || '',
+            artist: s.singer || '',
+            album: '',
+            duration: 0,
+            fee: 0,
+            _src: 'tencent',
+            _platform: 'tencent',
+            picUrl: s.mid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${s.mid}.jpg` : '',
+          }));
+        }
+      } catch {}
+    }
+
+    if (!songList || !Array.isArray(songList)) {
+      return [];
+    }
+
+    const songs = songList.map(s => {
+      const mid = s.songmid || s.mid || '';
+      const name = s.songname || s.name || '';
+      let artist = '';
+      if (Array.isArray(s.singer)) {
+        artist = s.singer.map(a => a.name || '').join(' / ');
+      } else if (typeof s.singer === 'string') {
+        artist = s.singer;
+      }
+      const album = s.albumname || (s.album && s.album.name) || '';
+      const albummid = s.albummid || (s.album && s.album.mid) || '';
+      const singermid = (s.singer && s.singer[0] && s.singer[0].mid) || '';
+      const duration = parseInt(s.interval || s.duration || 0);
+      let fee = 0;
+      if (s.pay) {
+        if (s.pay.payplay === 1 || s.pay.pay_play === 1) {
+          fee = 1;
+        } else if (s.pay.payalbum === 1 || s.pay.pay_album === 1) {
+          fee = 8;
+        }
+      }
+
+      return {
+        id: mid,
+        name,
+        artist,
+        album,
+        duration,
+        fee,
+        _src: 'tencent',
+        _platform: 'tencent',
+        picUrl: albummid
+          ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albummid}.jpg`
+          : (singermid
+            ? `https://y.gtimg.cn/music/photo_new/T001R300x300M000${singermid}.jpg`
+            : ''),
+      };
+    });
+
     return songs;
-  } catch {
+  } catch (e) {
+    logger.error('SourceManager:tencentSearch', 'Search failed', e);
     return [];
   }
 }
@@ -779,6 +927,54 @@ async function tencentSongUrl(songmid) {
     return null;
   } catch {
     return null;
+  }
+}
+
+const tencentPicCache = new Map();
+async function tencentSongPic(songmid) {
+  if (!songmid) return '';
+  if (tencentPicCache.has(songmid)) return tencentPicCache.get(songmid);
+  try {
+    const url = `https://c.y.qq.com/v8/fcg-bin/fcg_play_single_song.fcg?songmid=${encodeURIComponent(songmid)}&format=json`;
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'Referer': 'https://y.qq.com/',
+    };
+    let text = '';
+    if (NativeModules.MediaModule && NativeModules.MediaModule.nativeHttpGet) {
+      text = await NativeModules.MediaModule.nativeHttpGet(url, JSON.stringify(headers));
+    } else {
+      const res = await fetch(url, { headers });
+      text = await res.text();
+    }
+    let parsed = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      const jsonMatch = text.match(/^[a-zA-Z_0-9\$\.]+\s*\(([\s\S]*)\)\s*;?$/);
+      if (jsonMatch) parsed = JSON.parse(jsonMatch[1]);
+    }
+    const songData = parsed?.data?.[0];
+    const albummid = songData?.album?.mid;
+    const singermid = songData?.singer?.[0]?.mid;
+    let pic = '';
+    if (albummid) {
+      pic = `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albummid}.jpg`;
+    } else if (singermid) {
+      pic = `https://y.gtimg.cn/music/photo_new/T001R300x300M000${singermid}.jpg`;
+    }
+    tencentPicCache.set(songmid, pic);
+    if (tencentPicCache.size > 300) {
+      let drop = tencentPicCache.size - 200;
+      for (const k of tencentPicCache.keys()) {
+        if (drop-- <= 0) break;
+        tencentPicCache.delete(k);
+      }
+    }
+    return pic;
+  } catch (e) {
+    logger.warn('SourceManager', 'tencentSongPic error', e.message);
+    return '';
   }
 }
 
@@ -1261,6 +1457,44 @@ function normalizeKey(name, artist) {
   return `${(name || '').toLowerCase().trim()}__${(artist || '').toLowerCase().trim()}`;
 }
 
+/**
+ * 在线歌曲封面补拉（全平台统一入口）
+ * 解决用户收藏/老歌单条目缺少 picUrl 导致播放时无封面的问题
+ */
+async function fetchOnlineSongPic(track) {
+  if (!track) return '';
+  if (track.picUrl || track.cover) return track.picUrl || track.cover;
+  const platform = detectPlatform(track);
+  const songId = track.songId || track.id;
+  let url = '';
+  try {
+    if (platform === 'netease' && songId) {
+      url = await neteaseSongPic(songId);
+    } else if (platform === 'tencent' && songId) {
+      url = await tencentSongPic(songId);
+    } else if (platform === 'kugou') {
+      url = await kugouSongPic(songId, track);
+    }
+    // 兜底：若直连平台接口未能获取到封面，且有歌名，进行同名极速检索补齐封面
+    if (!url && track.name) {
+      const kw = `${track.name} ${track.artist || ''}`.trim();
+      const targetPlat = (platform && platform !== 'unknown') ? platform : 'tencent';
+      const results = await musicSearch(targetPlat, kw, 0);
+      const match = (results || []).find(s => s.picUrl);
+      if (match) url = match.picUrl;
+      if (!url) {
+        const altPlat = targetPlat === 'netease' ? 'tencent' : 'netease';
+        const altResults = await musicSearch(altPlat, kw, 0);
+        const altMatch = (altResults || []).find(s => s.picUrl);
+        if (altMatch) url = altMatch.picUrl;
+      }
+    }
+  } catch (e) {
+    logger.warn('SourceManager', 'fetchOnlineSongPic error', e.message);
+  }
+  return url;
+}
+
 // =====================================================================
 // 请求去重：相同 songId 的 URL 请求只发一次
 // =====================================================================
@@ -1317,7 +1551,7 @@ export async function musicSongUrl(playSource, songOrId, song) {
 async function _musicSongUrlImpl(playSource, songId, platform, song, quality = 'standard') {
   try {
     const _t0 = Date.now();
-    const _log = (label) => console.log(`[DBG] +${Date.now() - _t0}ms [source] ${label}`);
+    const _log = (label) => logger.info('SourceManager:musicSongUrl', `+${Date.now() - _t0}ms ${label}`);
     _log(`musicSongUrl: playSource=${playSource} platform=${platform} songId=${songId}`);
 
     // ===== LX 音源播放 =====
@@ -1332,19 +1566,19 @@ async function _musicSongUrlImpl(playSource, songId, platform, song, quality = '
           return { url, isLocal: false };
         }
 
-        // 第二步: WebView 沙箱（传入平台参数，支持五平台）
+        // 第二步: WebView 沙箱（传入平台与歌曲元数据，支持五平台与规范ID）
         _log('LX: fallback to WebView');
         url = null;
         if (isSandboxReady()) {
           _log('LX: sandbox ready, getLxMusicUrlWebView start');
-          url = await getLxMusicUrlWebView(sourceId, songId, '128k', platform);
+          url = await getLxMusicUrlWebView(sourceId, songId, '128k', platform, song);
           _log(`LX: getLxMusicUrlWebView done: ${url ? 'has url' : 'null'}`);
         } else {
           _log('LX: sandbox not ready, waitForSandboxReady(5000)');
           const waited = await waitForSandboxReady(5000);
           _log(`LX: waitForSandboxReady result: ${waited}`);
           if (waited) {
-            url = await getLxMusicUrlWebView(sourceId, songId, '128k', platform);
+            url = await getLxMusicUrlWebView(sourceId, songId, '128k', platform, song);
             _log(`LX: getLxMusicUrlWebView done: ${url ? 'has url' : 'null'}`);
           }
         }
@@ -1419,6 +1653,310 @@ async function getOfficialUrl(platform, songId, song, quality = 'standard') {
 }
 
 // =====================================================================
+// 多音源级联自动切换调度器 (Cascade Resolver)
+// =====================================================================
+
+/**
+ * 智能检测歌曲所属平台
+ * 优先根据明确的 platform/_src/source 字段，其次根据歌曲 ID 特征
+ * @param {object} song 歌曲对象
+ * @returns {string} 'netease' | 'tencent' | 'kuwo' | 'kugou'
+ */
+export function detectPlatform(song) {
+  if (!song) return 'netease';
+  const rawPlat = song._platform || song._src || song.platform || song.source;
+  if (rawPlat && ['netease', 'tencent', 'kuwo', 'kugou'].includes(rawPlat)) {
+    return rawPlat;
+  }
+  const idStr = String(song.songId || song.id || song.hash || song.mid || '');
+  if (idStr.includes('|') || /^[A-Fa-f0-9]{32}$/.test(idStr)) {
+    return 'kugou';
+  }
+  if (idStr.startsWith('MUSIC_') || (song.KMARK !== undefined && song.KMARK !== null)) {
+    return 'kuwo';
+  }
+  if (/^00[0-9a-zA-Z]{12}$/.test(idStr)) {
+    return 'tencent';
+  }
+  return 'netease';
+}
+
+function withTimeout(promise, ms, label = 'operation') {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timeout (${ms}ms)`)), ms)
+    ),
+  ]);
+}
+
+/**
+ * 跨搜索来源使用自定义(LX)音源解析
+ * 当原平台（如网易云）无法解析或无版权时，在其他平台（酷狗、酷我、QQ等）检索同名同歌手曲目，
+ * 并继续使用用户启用的自定义音源（LX Source）尝试解析播放。
+ * 严格杜绝官方 API 跨平台偷换/降级，杜绝 11 秒提示音。
+ *
+ * @param {object} song 原歌曲对象
+ * @param {string} preferredLxSourceId 首选自定义音源 ID（如 'lx:xxx'）
+ * @param {string} quality 音质
+ * @returns {Promise<{url: string, isLocal: boolean, sourceId: string, sourceName: string, switched: boolean, matchedSong: object}|null>}
+ */
+async function searchFallbackWithLxSource(song, preferredLxSourceId = '', quality = 'standard') {
+  if (!song) return null;
+  const title = song.name || song.title || '';
+  const artist = song.artist || '';
+  if (!title) return null;
+
+  const originalPlatform = detectPlatform(song);
+  const rawArtist = (artist || '').split(/[/,、&|;；]/)[0] || '';
+  const cleanArtist = rawArtist.replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '').trim().toLowerCase();
+  const cleanTargetName = title.replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '').toLowerCase();
+  const keyword = `${title} ${cleanArtist}`.trim();
+
+  // 获取所有可用的自定义音源列表（按优先级：首选自定义源排在最前）
+  let customSources = [];
+  try {
+    const registry = await loadRegistry();
+    const enabledCustoms = registry.filter(e => e && e.enabled !== false);
+    if (preferredLxSourceId && preferredLxSourceId.startsWith('lx:')) {
+      const prefId = preferredLxSourceId.slice(3);
+      const prefEntry = enabledCustoms.find(e => e.id === prefId);
+      const others = enabledCustoms.filter(e => e.id !== prefId);
+      customSources = (prefEntry ? [prefEntry, ...others] : enabledCustoms).map(e => ({
+        id: 'lx:' + e.id,
+        name: e.name || '自定义音源',
+      }));
+    } else {
+      customSources = enabledCustoms.map(e => ({
+        id: 'lx:' + e.id,
+        name: e.name || '自定义音源',
+      }));
+    }
+  } catch (e) {
+    logger.error('SourceManager', 'searchFallbackWithLxSource failed to load registry', e);
+  }
+
+  if (customSources.length === 0) {
+    logger.info('SourceManager', 'searchFallbackWithLxSource: No enabled custom sources available for cross-platform matching');
+    return null;
+  }
+
+  const isStrictMatch = (s) => {
+    if (!s || !s.name) return false;
+    const sNameClean = (s.name || '').replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '').toLowerCase();
+    const nameMatches = sNameClean === cleanTargetName || sNameClean.includes(cleanTargetName) || cleanTargetName.includes(sNameClean);
+    if (!nameMatches) return false;
+    if (cleanArtist) {
+      const sArtistClean = (s.artist || '').replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '').toLowerCase();
+      return sArtistClean.includes(cleanArtist) || cleanArtist.includes(sArtistClean);
+    }
+    return true;
+  };
+
+  const platforms = ['kugou', 'kuwo', 'netease', 'tencent'].filter(p => p !== originalPlatform);
+  const platNames = { kugou: '酷狗', kuwo: '酷我', netease: '网易云', tencent: 'QQ音乐' };
+
+  for (const plat of platforms) {
+    try {
+      let songs = [];
+      if (plat === 'kugou') songs = await kugouSearch(keyword, 0, 5);
+      else if (plat === 'kuwo') songs = await kuwoSearch(keyword, 0, 5);
+      else if (plat === 'netease') songs = await neteaseSearch(keyword, 0, 5);
+      else if (plat === 'tencent') songs = await tencentSearch(keyword, 0, 5);
+
+      if (songs && songs.length > 0) {
+        const match = songs.find(isStrictMatch);
+        if (match && match.id) {
+          logger.info('SourceManager', `searchFallbackWithLxSource matched on ${plat}: ${match.name} - ${match.artist} (id: ${match.id})`);
+          // 依次尝试用户启用的自定义音源解析此匹配曲目
+          for (const cSource of customSources) {
+            try {
+              const res = await withTimeout(
+                _musicSongUrlImpl(cSource.id, match.id, plat, match, quality),
+                10000,
+                `fallback-${plat}-${cSource.name}`
+              );
+              if (res && res.url && typeof res.url === 'string' && res.url.startsWith('http')) {
+                logger.info('SourceManager', `searchFallbackWithLxSource success: [${plat}] via [${cSource.name}]`);
+                return {
+                  url: res.url,
+                  isLocal: false,
+                  sourceId: cSource.id,
+                  sourceName: `${cSource.name} (${platNames[plat] || plat})`,
+                  switched: true,
+                  matchedSong: match,
+                };
+              }
+            } catch (err) {
+              logger.warn('SourceManager', `searchFallbackWithLxSource try [${cSource.name}] failed on ${plat}: ${err.message}`);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      logger.warn('SourceManager', `searchFallbackWithLxSource error on ${plat}: ${e.message}`);
+    }
+  }
+
+  return null;
+}
+
+const pendingCascadeMap = new Map();
+
+/**
+ * 多音源级联解析调度器
+ * 严格遵循用户原则：
+ * 1. 优先当前选定音源（若为 LX 自定义音源，给足 15 秒超时，绝不因沙箱延迟被误杀）
+ * 2. 次选用户导入的其他已启用自定义音源（各 10 秒超时）
+ * 3. 跨搜索平台切换：在其他平台同名匹配，并使用自定义音源进行解析（绝不调用官方跨平台API偷换曲目）
+ * 4. 官方非 VIP 原平台兜底：仅当原曲非 VIP（fee !== 1 && fee !== 8）时允许播放原平台普通直链
+ * 5. 若均无法解析，返回 null，播放器提示无法播放
+ *
+ * @param {object} song 歌曲对象
+ * @param {string} currentPlaySource 当前选中的音源 (official | lx:xxx)
+ * @param {string} quality 音质
+ * @returns {Promise<{url: string, isLocal: boolean, sourceId: string, sourceName: string, switched: boolean}|null>}
+ */
+async function resolvePlayableUrlCascade(song, currentPlaySource = 'official', quality = 'standard') {
+  if (!song) return null;
+  const songId = song.songId || song.id;
+  const platform = detectPlatform(song);
+  const title = song.name || song.title || '';
+  const artist = song.artist || '';
+
+  const cascadeKey = `${currentPlaySource}_${platform}_${songId || title}`;
+  if (pendingCascadeMap.has(cascadeKey)) {
+    return pendingCascadeMap.get(cascadeKey);
+  }
+
+  const cascadePromise = (async () => {
+    logger.info('SourceManager', `Cascade start for "${title}" (${songId}) [platform=${platform}, primary=${currentPlaySource}]`);
+
+    // ==========================================
+    // 【第 1 梯队】：当前选定的音源 (Primary Source)
+    // ==========================================
+    if (songId) {
+      try {
+        const isLx = currentPlaySource.startsWith('lx:');
+        // 自定义音源给 15 秒充足超时（沙箱跨进程+外部脚本请求耗时较长），官方源给 5 秒
+        const timeoutMs = isLx ? 15000 : 5000;
+        logger.info('SourceManager', `Cascade Tier 1: Trying primary source [${currentPlaySource}] with timeout ${timeoutMs}ms`);
+        const primaryRes = await withTimeout(
+          _musicSongUrlImpl(currentPlaySource, songId, platform, song, quality),
+          timeoutMs,
+          `Tier1-${currentPlaySource}`
+        );
+        if (primaryRes && primaryRes.url && primaryRes.url.startsWith('http')) {
+          logger.info('SourceManager', `Cascade Tier 1: Success with primary [${currentPlaySource}]`);
+          return {
+            url: primaryRes.url,
+            isLocal: primaryRes.isLocal || false,
+            sourceId: currentPlaySource,
+            sourceName: '',
+            switched: false,
+          };
+        }
+      } catch (e) {
+        logger.warn('SourceManager', `Cascade Tier 1 failed: ${e.message}`);
+      }
+    }
+
+    // ==========================================
+    // 【第 2 梯队】：用户导入的其他已启用自定义音源 (Custom Sources)
+    // ==========================================
+    try {
+      const registry = await loadRegistry();
+      const currentLxId = currentPlaySource.startsWith('lx:') ? currentPlaySource.slice(3) : null;
+      const customCandidates = registry.filter(e => e && e.enabled !== false && e.id !== currentLxId);
+
+      if (customCandidates.length > 0 && songId) {
+        logger.info('SourceManager', `Cascade Tier 2: Found ${customCandidates.length} custom sources to try`);
+        for (const entry of customCandidates) {
+          try {
+            logger.info('SourceManager', `Cascade Tier 2: Trying [${entry.name}] (${entry.id})`);
+            const customRes = await withTimeout(
+              _musicSongUrlImpl('lx:' + entry.id, songId, platform, song, quality),
+              10000,
+              `Tier2-${entry.name}`
+            );
+            if (customRes && customRes.url && customRes.url.startsWith('http')) {
+              logger.info('SourceManager', `Cascade Tier 2: Success with [${entry.name}]`);
+              return {
+                url: customRes.url,
+                isLocal: false,
+                sourceId: 'lx:' + entry.id,
+                sourceName: entry.name || '自定义音源',
+                switched: true,
+              };
+            }
+          } catch (e) {
+            logger.warn('SourceManager', `Cascade Tier 2 [${entry.name}] failed: ${e.message}`);
+          }
+        }
+      }
+    } catch (e) {
+      logger.error('SourceManager', 'Cascade Tier 2 registry error', e);
+    }
+
+    // ==========================================
+    // 【第 3 梯队】：跨搜索来源切换（使用自定义音源进行同名严格解析）
+    // 杜绝官方跨平台偷换，只在其他平台检索后由用户导入的音源解析
+    // ==========================================
+    try {
+      logger.info('SourceManager', `Cascade Tier 3: Trying cross-search-platform with LX source for "${title}" - "${artist}"`);
+      const crossLxRes = await searchFallbackWithLxSource(song, currentPlaySource, quality);
+      if (crossLxRes && crossLxRes.url && crossLxRes.url.startsWith('http')) {
+        logger.info('SourceManager', `Cascade Tier 3: Success with ${crossLxRes.sourceName}`);
+        return crossLxRes;
+      }
+    } catch (e) {
+      logger.warn('SourceManager', `Cascade Tier 3 error: ${e.message}`);
+    }
+
+    // ==========================================
+    // 【第 4 梯队】：原平台官方免费曲目兜底
+    // 严格限制：非 VIP 曲目（fee !== 1 && fee !== 8），且绝不跨平台降级
+    // ==========================================
+    const isVip = song.fee === 1 || song.fee === 8;
+    if (!isVip && songId) {
+      try {
+        logger.info('SourceManager', `Cascade Tier 4: Trying official non-VIP link on platform [${platform}]`);
+        const offRes = await withTimeout(
+          getOfficialUrl(platform, songId, song, quality),
+          4000,
+          `Tier4-official-${platform}`
+        );
+        if (offRes && offRes.url && offRes.url.startsWith('http')) {
+          logger.info('SourceManager', `Cascade Tier 4: Success with official platform [${platform}]`);
+          return {
+            url: offRes.url,
+            isLocal: false,
+            sourceId: 'official',
+            sourceName: '官方免费源',
+            switched: currentPlaySource !== 'official',
+          };
+        }
+      } catch (e) {
+        logger.warn('SourceManager', `Cascade Tier 4 failed: ${e.message}`);
+      }
+    } else if (isVip) {
+      logger.info('SourceManager', `Cascade Tier 4 skipped: Song is VIP (fee=${song.fee}), official API cannot play`);
+    }
+
+    // ==========================================
+    // 【第 5 梯队】：全部音源均无法播放
+    // ==========================================
+    logger.warn('SourceManager', `Cascade: All sources exhausted for "${title}" (${songId})`);
+    return null;
+  })().finally(() => {
+    pendingCascadeMap.delete(cascadeKey);
+  });
+
+  pendingCascadeMap.set(cascadeKey, cascadePromise);
+  return cascadePromise;
+}
+
+// =====================================================================
 // 导出网易云专用 API（lyrics-engine 和 player-engine 使用）
 // =====================================================================
 
@@ -1433,11 +1971,19 @@ export {
   kugouLyrics,
   kuwoLyrics,
   searchFallbackLyrics,
+  searchFallbackWithLxSource,
+  resolvePlayableUrlCascade,
+  tencentSongPic,
+  kugouSongPic,
+  fetchOnlineSongPic,
 };
 
 export default {
+  detectPlatform,
   musicSearch,
   musicSongUrl,
+  resolvePlayableUrlCascade,
+  searchFallbackWithLxSource,
   importFromUrl,
   importFromFile,
   deleteSource,
@@ -1463,4 +2009,7 @@ export default {
   kugouLyrics,
   kuwoLyrics,
   searchFallbackLyrics,
+  tencentSongPic,
+  kugouSongPic,
+  fetchOnlineSongPic,
 };

@@ -19,6 +19,7 @@ import { getCacheSize, clearCache } from '../core/cache-manager';
 import { formatCacheSize } from '../utils/format';
 import { checkForUpdate, shouldShowUpdateDialog, getCurrentVersionName, clearSkippedVersion } from '../core/updater';
 import { isMediaNotificationEnabled, setMediaNotificationEnabled } from '../core/media-session';
+import logger from '../core/logger';
 
 const BUILTIN_SOURCES = [
   { id: 'netease', label: '网易云音乐' },
@@ -40,6 +41,7 @@ export default function SettingsScreen({ visible, onClose }) {
   const { setToast, themeMode, setThemeMode, allowMixWithOthers, setAllowMixWithOthers, favorites } = usePlayerStore();
 
   const [cacheSize, setCacheSize] = useState('0 B (0 个文件)');
+  const [logSize, setLogSize] = useState('0 B');
   const [cacheLimit, setCacheLimit] = useState(500);
   const [customSources, setCustomSources] = useState([]);
   const [sourceMgmtVisible, setSourceMgmtVisible] = useState(false);
@@ -65,6 +67,9 @@ export default function SettingsScreen({ visible, onClose }) {
       // 计算实际缓存大小
       const { totalSize, fileCount } = await getCacheSize();
       setCacheSize(`${formatCacheSize(totalSize)} (${fileCount} 个文件)`);
+      // 计算日志大小
+      const logInfo = await logger.getLogSize();
+      setLogSize(logInfo.formatted);
       // 获取当前版本名
       const vName = await getCurrentVersionName();
       setAppVersion(vName);
@@ -85,7 +90,7 @@ export default function SettingsScreen({ visible, onClose }) {
   const handleClearCache = () => {
     Alert.alert(
       '清理缓存',
-      '确定要清理音乐缓存吗？',
+      '确定要清理音乐缓存与运行日志吗？',
       [
         { text: '取消', style: 'cancel' },
         {
@@ -93,7 +98,34 @@ export default function SettingsScreen({ visible, onClose }) {
           onPress: async () => {
             await clearCache();
             setCacheSize('0 B (0 个文件)');
-            setToast('缓存已清理');
+            setLogSize('0 B');
+            setToast('音乐缓存与运行日志已清理');
+          }
+        }
+      ]
+    );
+  };
+
+  const handleShareLog = async () => {
+    setToast('正在准备分享日志...');
+    const res = await logger.shareLog();
+    if (!res.success && res.message) {
+      setToast(res.message);
+    }
+  };
+
+  const handleClearLogs = () => {
+    Alert.alert(
+      '清理日志',
+      '确定要清理运行日志吗？',
+      [
+        { text: '取消', style: 'cancel' },
+        {
+          text: '确定',
+          onPress: async () => {
+            await logger.clearLogs();
+            setLogSize('0 B');
+            setToast('运行日志已清空');
           }
         }
       ]
@@ -482,6 +514,26 @@ export default function SettingsScreen({ visible, onClose }) {
                     </Text>
                   </TouchableOpacity>
                 ))}
+              </View>
+
+              {/* === 运行日志 === */}
+              <View style={[styles.row, { borderColor: 'transparent', marginTop: 16 }]}>
+                <Text style={[styles.rowLabel, { color: colors.textSecondary }]}>运行日志占用</Text>
+                <Text style={[styles.rowValue, { color: colors.textMuted }]}>{logSize}</Text>
+              </View>
+              <View style={{ flexDirection: 'row', gap: 10, marginTop: 8 }}>
+                <TouchableOpacity
+                  style={[styles.actionBtn, { flex: 1, backgroundColor: colors.bgTertiary, borderWidth: 1, borderColor: colors.border }]}
+                  onPress={handleShareLog}
+                >
+                  <Text style={[styles.actionBtnText, { color: colors.textPrimary }]}>📤 导出/分享日志</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.actionBtn, { flex: 1, backgroundColor: colors.bgTertiary, borderWidth: 1, borderColor: colors.border }]}
+                  onPress={handleClearLogs}
+                >
+                  <Text style={[styles.actionBtnText, { color: colors.textSecondary }]}>🗑️ 清空日志</Text>
+                </TouchableOpacity>
               </View>
             </View>
 

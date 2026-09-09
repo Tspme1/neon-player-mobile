@@ -1,9 +1,10 @@
 // NeonPlayer Mobile — App 入口（重构版）
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, StatusBar, Platform, BackHandler, ToastAndroid } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, StatusBar, Platform, BackHandler, ToastAndroid, AppState, Keyboard } from 'react-native';
 
 import { useTheme } from './src/theme/useTheme';
 import { usePlayerStore, initApp } from './src/store/useStore';
+import logger from './src/core/logger';
 
 import LocalScreen from './src/screens/LocalScreen';
 import OnlineScreen from './src/screens/OnlineScreen';
@@ -51,7 +52,43 @@ export default function App() {
     (!isRoaming && currentIndex >= 0 && currentIndex < playlist.length);
   const miniPlayerHeight = hasTrack ? 64 : 0;
 
+  // 监听软键盘状态：键盘弹起时隐藏底边栏和迷你播放器，防止 Android 14 将底栏顶起
+  const [isKeyboardVisible, setKeyboardVisible] = useState(false);
+
   useEffect(() => {
+    const onShow = () => setKeyboardVisible(true);
+    const onHide = () => setKeyboardVisible(false);
+
+    const s1 = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow', onShow);
+    const s2 = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide', onHide);
+    return () => {
+      s1.remove();
+      s2.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    logger.initLogger();
+    logger.info('App', 'App mounted, initializing...');
+
+    // 捕获未处理的全局 JS 异常
+    if (global.ErrorUtils && !global._customErrorHandlerInstalled) {
+      global._customErrorHandlerInstalled = true;
+      const defaultHandler = global.ErrorUtils.getGlobalHandler();
+      global.ErrorUtils.setGlobalHandler((error, isFatal) => {
+        logger.error('GlobalCrash', isFatal ? 'Fatal Exception' : 'Uncaught Error', error?.stack || error?.message);
+        logger.flush();
+        if (defaultHandler) defaultHandler(error, isFatal);
+      });
+    }
+
+    const appStateSub = AppState.addEventListener('change', (nextAppState) => {
+      logger.info('App', 'AppState changed', nextAppState);
+      if (nextAppState === 'background') {
+        logger.flush();
+      }
+    });
+
     initApp();
 
     // 启动后静默检查更新（延迟 3 秒）
@@ -62,6 +99,10 @@ export default function App() {
         setUpdateDialogVisible(true);
       }
     }, 3000);
+
+    return () => {
+      appStateSub.remove();
+    };
   }, []);
 
   // === Android 返回键处理 ===
@@ -135,36 +176,40 @@ export default function App() {
     <>
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bgPrimary} />
       <View style={[styles.container, { backgroundColor: colors.bgPrimary }]}>
-        <View style={[styles.content, { paddingBottom: tabBarHeight + miniPlayerHeight }]}>
+        <View style={[styles.content, { paddingBottom: isKeyboardVisible ? 0 : (tabBarHeight + miniPlayerHeight) }]}>
           <ActiveScreen />
         </View>
 
-        <View style={[styles.miniPlayerWrap, { bottom: tabBarHeight }]}>
-          <MiniPlayer onPress={() => setFullPlayerVisible(true)} />
-        </View>
+        {!isKeyboardVisible && (
+          <>
+            <View style={[styles.miniPlayerWrap, { bottom: tabBarHeight }]}>
+              <MiniPlayer onPress={() => setFullPlayerVisible(true)} />
+            </View>
 
-        <View style={[styles.tabBar, { backgroundColor: colors.glassBgStrong, borderTopColor: colors.border }]}>
-          {TABS.map(tab => {
-            const Icon = tab.icon;
-            const isActive = activeTab === tab.id;
-            return (
-              <TouchableOpacity
-                key={tab.id}
-                style={styles.tabBtn}
-                onPress={() => setActiveTab(tab.id)}
-              >
-                <Icon width={22} height={22} color={isActive ? colors.accent : colors.textMuted} />
-                <Text style={{
-                  color: isActive ? colors.accent : colors.textMuted,
-                  fontSize: 10,
-                  marginTop: 2,
-                }}>
-                  {tab.label}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
+            <View style={[styles.tabBar, { backgroundColor: colors.glassBgStrong, borderTopColor: colors.border }]}>
+              {TABS.map(tab => {
+                const Icon = tab.icon;
+                const isActive = activeTab === tab.id;
+                return (
+                  <TouchableOpacity
+                    key={tab.id}
+                    style={styles.tabBtn}
+                    onPress={() => setActiveTab(tab.id)}
+                  >
+                    <Icon width={22} height={22} color={isActive ? colors.accent : colors.textMuted} />
+                    <Text style={{
+                      color: isActive ? colors.accent : colors.textMuted,
+                      fontSize: 10,
+                      marginTop: 2,
+                    }}>
+                      {tab.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </>
+        )}
 
         <FullPlayer
           visible={fullPlayerVisible}
