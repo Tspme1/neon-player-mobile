@@ -12,6 +12,7 @@ import {
 import { getLxLyricWebView } from '../services/lx-webview-manager';
 import { loadSettings } from './storage';
 import { EVENTS, emit } from './event-bus';
+import { AppState } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import logger from './logger';
 
@@ -78,7 +79,7 @@ async function readLocalLrc(track) {
 // =====================================================================
 
 /**
- * 获取歌词（多源路由 + 跨源同名搜索兜底 + 内存缓存）
+ * 获取歌词（多源路由 + 官方原源保障 + 跨源同名搜索兜底 + 内存缓存）
  * 获取成功后通过 event-bus emit `lyrics:loaded`
  * @param {Object|string|number} trackOrSongId 歌曲对象或歌曲ID
  * @returns {Promise<Array>} 歌词数组
@@ -114,18 +115,22 @@ export async function fetchLyrics(trackOrSongId) {
 
   try {
     let lrcRes = null;
+    let parsed = [];
     const isLocal = track.type === 'local' || (!track.type && (track.path || track.cachedPath));
 
     if (isLocal) {
       // 本地歌曲优先查找同目录 .lrc
       lrcRes = await readLocalLrc(track);
+      if (lrcRes && lrcRes.lrc) {
+        parsed = parseLyrics(lrcRes.lrc, lrcRes.tlyric);
+      }
     } else {
       // 在线歌曲
       const platform = track._platform || track._src || 'netease';
       const songId = track.songId || track.id || track.songmid || track.hash;
       logger.info('LyricsEngine', 'fetchLyrics online', { platform, songId });
 
-      // 优先检测是否配置了 LX 自定义音源
+      // 1. 优先尝试 LX 自定义音源（如果已配置）
       try {
         const settings = await loadSettings();
         const playSource = settings.playSource || 'official';
@@ -133,34 +138,47 @@ export async function fetchLyrics(trackOrSongId) {
           const lxSourceId = playSource.replace('lx:', '');
           const lxResult = await getLxLyricWebView(lxSourceId, track, platform);
           if (lxResult && lxResult.lrc) {
-            lrcRes = lxResult;
-            logger.info('LyricsEngine', 'LX lyric fetched successfully');
+            const testParsed = parseLyrics(lxResult.lrc, lxResult.tlyric);
+            if (testParsed && testParsed.length > 0) {
+              lrcRes = lxResult;
+              parsed = testParsed;
+              logger.info('LyricsEngine', 'LX lyric fetched successfully', { lines: parsed.length });
+            } else {
+              logger.warn('LyricsEngine', 'LX lyric returned unparseable content, fallback to official');
+            }
           }
         }
       } catch (e) {
         logger.warn('LyricsEngine', 'LX lyric attempt failed', e?.message);
       }
 
-      // 如果 LX 音源未提供歌词，回退至官方接口
-      if (!lrcRes || !lrcRes.lrc) {
+      // 2. 如果 LX 音源未返回有效歌词，强制回退至原平台官方专属接口（按精确歌曲 ID 查询，100% 准确原版）
+      if (!parsed || parsed.length === 0) {
         logger.info('LyricsEngine', 'official lyric request', { platform, songId });
-        if (platform === 'netease' && songId) {
-          lrcRes = await neteaseLyrics(songId);
-        } else if (platform === 'tencent') {
-          const songmid = track.songmid || songId;
-          lrcRes = await tencentLyrics(songmid);
-        } else if (platform === 'kugou') {
-          lrcRes = await kugouLyrics(track);
-        } else if (platform === 'kuwo') {
-          lrcRes = await kuwoLyrics(songId);
+        try {
+          if (platform === 'netease' && songId) {
+            lrcRes = await neteaseLyrics(songId);
+          } else if (platform === 'tencent') {
+            const songmid = track.songmid || songId;
+            lrcRes = await tencentLyrics(songmid);
+          } else if (platform === 'kugou') {
+            lrcRes = await kugouLyrics(track);
+          } else if (platform === 'kuwo') {
+            lrcRes = await kuwoLyrics(songId);
+          }
+          if (lrcRes && lrcRes.lrc) {
+            parsed = parseLyrics(lrcRes.lrc, lrcRes.tlyric);
+            if (parsed && parsed.length > 0) {
+              logger.info('LyricsEngine', 'Official lyric parsed successfully', { platform, lines: parsed.length });
+            }
+          }
+        } catch (err) {
+          logger.warn('LyricsEngine', 'Official lyric request failed', err?.message);
         }
       }
     }
 
-    // 解析歌词
-    let parsed = (lrcRes && lrcRes.lrc) ? parseLyrics(lrcRes.lrc, lrcRes.tlyric) : [];
-
-    // 2. 跨源同名搜索兜底（如果专属源未返回有效歌词）
+    // 3. 跨源同名搜索兜底（仅当专属源与官方接口均未获取到有效歌词时触发）
     if (!parsed || parsed.length === 0) {
       const title = track.name || track.title || '';
       const artist = track.artist || '';
@@ -213,6 +231,8 @@ export async function fetchLyrics(trackOrSongId) {
  */
 export function updateHighlight(currentTime) {
   if (lyricsData.length === 0) return;
+  // 后台/锁屏待机状态直接跳过歌词滚动与高亮计算，节省系统资源与电量
+  if (AppState.currentState === 'background') return;
 
   const newIndex = findCurrentLyricIndex(lyricsData, currentTime);
   if (newIndex !== currentLyricIndex) {

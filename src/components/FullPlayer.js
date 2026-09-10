@@ -10,7 +10,7 @@ import {
   PlayIcon, PauseIcon, PrevIcon, NextIcon, HeartIcon,
   ShuffleIcon, RepeatIcon, RepeatOneIcon, ChevronDownIcon,
   VolumeOnIcon, VolumeMuteIcon, ListIcon, MoreIcon, DownloadIcon,
-  ClockIcon, ShareIcon, FolderIcon
+  ClockIcon, ShareIcon, FolderIcon, MusicIcon, CheckIcon
 } from './icons';
 import { usePlayerStore } from '../store/useStore';
 import { isFavorited as checkFavorited, toggleFavorite as toggleFav, loadSettings } from '../core/storage';
@@ -485,9 +485,12 @@ export default function FullPlayer({ visible, onClose, onQueuePress }) {
                   setQualityPickerVisible(false);
                   setToast('音质已切换为' + opt.label);
                 }}>
-                  <Text style={[styles.sleepOptionText, { color: currentQ === opt.value ? colors.accent : colors.textPrimary }]}>
-                    {opt.label}{currentQ === opt.value ? ' ✓' : ''}
-                  </Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
+                    <Text style={[styles.sleepOptionText, { color: currentQ === opt.value ? colors.accent : colors.textPrimary }]}>
+                      {opt.label}
+                    </Text>
+                    {currentQ === opt.value && <CheckIcon width={16} height={16} color={colors.accent} style={{ marginLeft: 6 }} />}
+                  </View>
                 </TouchableOpacity>
               );
             })}
@@ -509,7 +512,7 @@ export default function FullPlayer({ visible, onClose, onQueuePress }) {
               onError={() => setCoverFailed(true)}
             />
           ) : (
-            <Text style={{ fontSize: 48 }}>🎵</Text>
+            <MusicIcon width={56} height={56} color={colors.textMuted} strokeWidth={1.5} />
           )}
         </View>
       </View>
@@ -536,6 +539,7 @@ export default function FullPlayer({ visible, onClose, onQueuePress }) {
             <ScrollView
               ref={lyricsScrollRef}
               style={styles.lyricsScroll}
+              showsVerticalScrollIndicator={showJumpControl}
               contentContainerStyle={[
                 styles.lyricsContent,
                 { paddingVertical: Math.max(20, Math.floor(scrollAreaHeight / 2 - 20)) }
@@ -919,7 +923,8 @@ const styles = StyleSheet.create({
     paddingBottom: 4,
   },
   slider: {
-    width: '100%', height: 40,
+    width: '100%',
+    height: 40,
   },
   timeRow: {
     flexDirection: 'row',

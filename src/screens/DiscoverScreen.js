@@ -14,7 +14,7 @@ import TrackItem from '../components/TrackItem';
 import Spinner from '../components/Spinner';
 import EmptyState from '../components/EmptyState';
 import ContextMenu from '../components/ContextMenu';
-import { TrophyIcon, FlameIcon, CompassIcon, ChevronLeftIcon } from '../components/icons';
+import { TrophyIcon, FlameIcon, CompassIcon, ChevronLeftIcon, FolderPlusIcon, DownloadIcon, PlayIcon, FolderIcon, SettingsIcon } from '../components/icons';
 
 const SUB_TABS = [
   { id: 'toplist', label: '排行榜', icon: TrophyIcon },
@@ -351,6 +351,13 @@ export default function DiscoverScreen() {
     <View style={styles.container}>
       <View style={styles.header}>
         <Text style={[styles.title, { color: colors.textPrimary }]}>发现音乐</Text>
+        <View style={{ flex: 1 }} />
+        <TouchableOpacity
+          style={[styles.settingsBtn, { borderColor: colors.border }]}
+          onPress={() => usePlayerStore.setState({ settingsVisible: true })}
+        >
+          <SettingsIcon width={16} height={16} color={colors.textSecondary} />
+        </TouchableOpacity>
       </View>
       {/* Sub tabs */}
       <View style={[styles.subTabRow, { borderColor: colors.border }]}>
@@ -390,10 +397,10 @@ export default function DiscoverScreen() {
         x={menuPos.x}
         y={menuPos.y}
         actions={[
-          { label: '📑 添加到歌单', onPress: () => usePlayerStore.getState().openAddToPlaylist(menuTrack) },
-          { label: '⬇ 下载', onPress: () => handleDownload(menuTrack) },
-          { label: '▶ 下一首播放', onPress: () => handlePlayNext(menuTrack, menuIndex) },
-          { label: '📂 打开下载路径', onPress: () => handleOpenDownloadDir() },
+          { label: '添加到歌单', icon: FolderPlusIcon, onPress: () => usePlayerStore.getState().openAddToPlaylist(menuTrack) },
+          { label: '下载', icon: DownloadIcon, onPress: () => handleDownload(menuTrack) },
+          { label: '下一首播放', icon: PlayIcon, onPress: () => handlePlayNext(menuTrack, menuIndex) },
+          { label: '打开下载路径', icon: FolderIcon, onPress: () => handleOpenDownloadDir() },
         ]}
       />
     </View>
@@ -402,7 +409,22 @@ export default function DiscoverScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  header: { paddingHorizontal: 16, paddingTop: HEADER_PADDING_TOP, paddingBottom: 4 },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingTop: HEADER_PADDING_TOP,
+    paddingBottom: 4,
+  },
+  settingsBtn: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 8,
+    borderWidth: 1,
+    flexShrink: 0,
+  },
   title: { fontSize: 22, fontWeight: '700' },
   subTabRow: {
     flexDirection: 'row',

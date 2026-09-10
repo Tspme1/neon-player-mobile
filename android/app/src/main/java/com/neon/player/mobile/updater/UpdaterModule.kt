@@ -358,4 +358,63 @@ class UpdaterModule(reactContext: ReactApplicationContext) :
             promise.reject("OPEN_ERROR", e.message)
         }
     }
+
+    @ReactMethod
+    fun saveFileToDownloads(fileName: String, content: String, subDir: String, mimeType: String, promise: Promise) {
+        try {
+            val safeName = fileName.replace('/', '_').replace('\\', '_').replace(':', '_')
+                .replace('*', '_').replace('?', '_').replace('"', '_').replace('<', '_')
+                .replace('>', '_').replace('|', '_')
+
+            val targetSubDir = if (subDir.isNotEmpty()) {
+                android.os.Environment.DIRECTORY_DOWNLOADS + "/" + subDir
+            } else {
+                android.os.Environment.DIRECTORY_DOWNLOADS + "/NeonPlayer"
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val resolver = reactApplicationContext.contentResolver
+                val contentValues = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, safeName)
+                    put(android.provider.MediaStore.MediaColumns.MIME_TYPE, if (mimeType.isNotEmpty()) mimeType else "application/json")
+                    put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, targetSubDir)
+                    put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+
+                val collection = android.provider.MediaStore.Downloads.getContentUri(android.provider.MediaStore.VOLUME_EXTERNAL)
+                val itemUri = resolver.insert(collection, contentValues)
+                    ?: run {
+                        promise.reject("SAVE_ERROR", "Cannot create MediaStore entry")
+                        return
+                    }
+
+                resolver.openOutputStream(itemUri)?.use { output ->
+                    output.write(content.toByteArray(Charsets.UTF_8))
+                    output.flush()
+                } ?: run {
+                    resolver.delete(itemUri, null, null)
+                    promise.reject("SAVE_ERROR", "Cannot open output stream")
+                    return
+                }
+
+                val updateValues = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
+                }
+                resolver.update(itemUri, updateValues, null, null)
+                val displayPath = "$targetSubDir/$safeName"
+                Log.d("UpdaterModule", "[saveFileToDownloads] saved to: $itemUri, path: $displayPath")
+                promise.resolve(displayPath)
+            } else {
+                val downloadDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                val targetDir = File(downloadDir, subDir.ifEmpty { "NeonPlayer" })
+                if (!targetDir.exists()) targetDir.mkdirs()
+                val targetFile = File(targetDir, safeName)
+                targetFile.writeText(content, Charsets.UTF_8)
+                promise.resolve(targetFile.absolutePath)
+            }
+        } catch (e: Exception) {
+            Log.e("UpdaterModule", "[saveFileToDownloads] error: ${e.message}", e)
+            promise.reject("SAVE_ERROR", e.message)
+        }
+    }
 }

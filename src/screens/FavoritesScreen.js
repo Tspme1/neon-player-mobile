@@ -1,4 +1,4 @@
-﻿// 喜欢与自建歌单管理页
+// 喜欢与自建歌单管理页
 import React, { useState } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, StyleSheet, Modal,
@@ -12,7 +12,7 @@ import { isFavorited, toggleFavorite } from '../core/storage';
 import TrackItem from '../components/TrackItem';
 import EmptyState from '../components/EmptyState';
 import ContextMenu from '../components/ContextMenu';
-import { ChevronDownIcon, SettingsIcon } from '../components/icons';
+import { ChevronDownIcon, SettingsIcon, CloseIcon, PlusIcon, HeartIcon, FolderPlusIcon, PlayIcon, DownloadIcon, TrashIcon } from '../components/icons';
 import { musicSongUrl } from '../core/source-manager';
 
 export default function FavoritesScreen() {
@@ -268,7 +268,7 @@ export default function FavoritesScreen() {
                   <View style={[styles.modalHeader, { borderBottomColor: colors.border }]}>
                     <Text style={[styles.modalHeaderTitle, { color: colors.textPrimary }]}>选择歌单</Text>
                     <TouchableOpacity onPress={() => setDropdownOpen(false)} style={styles.closeBtn}>
-                      <Text style={[styles.closeBtnText, { color: colors.textMuted }]}>✕</Text>
+                      <CloseIcon width={16} height={16} color={colors.textMuted} />
                     </TouchableOpacity>
                   </View>
 
@@ -320,7 +320,8 @@ export default function FavoritesScreen() {
                           setCreateModalVisible(true);
                         }}
                       >
-                        <Text style={styles.actionPillTextWhite}>➕ 新建歌单</Text>
+                        <PlusIcon width={14} height={14} color="#fff" />
+                        <Text style={styles.actionPillTextWhite}>新建歌单</Text>
                       </TouchableOpacity>
 
                       {!isDefaultFavorites && (
@@ -475,23 +476,28 @@ export default function FavoritesScreen() {
           actions={[
             {
               label: isFavorited(selectedTrack, favorites) ? '从我喜欢移除' : '加入我喜欢',
+              icon: HeartIcon,
               onPress: () => handleToggleFav(selectedTrack),
             },
             {
               label: '添加到歌单',
+              icon: FolderPlusIcon,
               onPress: () => openAddToPlaylist(selectedTrack),
             },
             ...(!isDefaultFavorites ? [{
               label: '从本歌单移除',
+              icon: TrashIcon,
               destructive: true,
               onPress: () => removeTrackFromPlaylist(currentPlaylistId, selectedTrack.id || selectedTrack.songId || selectedTrack.path),
             }] : []),
             {
               label: '下一首播放',
+              icon: PlayIcon,
               onPress: () => handlePlayNextInQueue(selectedTrack),
             },
             {
               label: '下载歌曲',
+              icon: DownloadIcon,
               onPress: () => handleDownload(selectedTrack),
             },
           ]}
@@ -618,10 +624,12 @@ const styles = StyleSheet.create({
   },
   actionPillBtn: {
     flex: 1,
-    paddingVertical: 8,
-    borderRadius: 8,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 8,
+    borderRadius: 8,
   },
   actionPillTextWhite: {
     color: '#fff',

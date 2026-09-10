@@ -61,6 +61,7 @@ let isRoaming = false;
 let isPlaying = false;
 let position = 0;
 let duration = 0;
+let isCurrentFileCached = false; // 当前音轨是否来自本地文件或完整缓存
 let volume = 0.8;
 let isMuted = false;
 let userPaused = false; // true when user explicitly paused (not interrupted by other apps)
@@ -130,73 +131,87 @@ async function unloadSound() {
   }
 }
 
+function isRecentlyNoisy() {
+  try {
+    return !!NativeModules.MediaModule?.isRecentlyNoisy?.();
+  } catch {
+    return false;
+  }
+}
+
 function setupPlaybackStatusUpdate() {
   if (!soundObject) return;
   soundObject.setOnPlaybackStatusUpdate((status) => {
-    if (status.isLoaded) {
-      position = status.positionMillis || 0;
-      duration = status.durationMillis || 0;
+    try {
+      if (status.isLoaded) {
+        position = status.positionMillis || 0;
+        duration = status.durationMillis || 0;
 
-      // 只在 isPlaying 真正变化时才通知（避免状态抖动）
-      const playingChanged = status.isPlaying !== isPlaying;
-      if (playingChanged) {
-        isPlaying = status.isPlaying;
+        // 只在 isPlaying 真正变化时才通知（避免状态抖动）
+        const playingChanged = status.isPlaying !== isPlaying;
+        if (playingChanged) {
+          isPlaying = status.isPlaying;
 
-        // If allowMixWithOthers and playing changed to false without user action,
-        // it's an audio focus interruption from another app → resume immediately
-        // (Must NOT trigger when track naturally finishes)
-        if (!status.isPlaying && !status.didJustFinish && allowMixWithOthers && !userPaused && soundObject) {
-          console.log('[PlayerEngine] Audio focus interrupted, resuming immediately');
-          soundObject.playAsync().catch(e => {
-            console.error('[PlayerEngine] Auto-resume failed:', e);
-          });
-          Audio.setAudioModeAsync({
-            allowsRecordingIOS: false,
-            staysActiveInBackground: true,
-            playsInSilentModeIOS: true,
-            shouldDuckAndroid: false,
-            playThroughEarpieceAndroid: false,
-            interruptionModeAndroid: 2, // DUCK_OTHERS — less aggressive
-          }).catch(() => {});
-        }
-      }
-
-      // 通知位置/时长更新（每次都发，UI 进度条需要）
-      emit(EVENTS.PLAYBACK_STATE_CHANGE, {
-        position: position,
-        duration: duration,
-        ...(playingChanged ? { isPlaying: status.isPlaying } : {}),
-      });
-
-      // 更新歌词高亮
-      const currentTimeSec = (status.positionMillis || 0) / 1000;
-      updateHighlight(currentTimeSec);
-
-      // 自动播放下一首或单曲循环
-      if (status.didJustFinish) {
-        if (playMode === 'repeat-one') {
-          logger.info('PlayerEngine', 'repeat-one didJustFinish, replaying');
-          position = 0;
-          isPlaying = true;
-          emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: true, position: 0, duration });
-          updateHighlight(0);
-          if (soundObject) {
-            soundObject.replayAsync().catch(e => {
-              logger.error('PlayerEngine', 'replayAsync error', e);
+          // If allowMixWithOthers and playing changed to false without user action,
+          // it's an audio focus interruption from another app → resume immediately
+          // (Must NOT trigger when track naturally finishes, or when headset disconnected / becoming noisy)
+          if (!status.isPlaying && !status.didJustFinish && allowMixWithOthers && !userPaused && !isRecentlyNoisy() && soundObject) {
+            console.log('[PlayerEngine] Audio focus interrupted, resuming immediately');
+            soundObject.playAsync().catch(e => {
+              console.error('[PlayerEngine] Auto-resume failed:', e);
             });
+            Audio.setAudioModeAsync({
+              allowsRecordingIOS: false,
+              staysActiveInBackground: true,
+              playsInSilentModeIOS: true,
+              shouldDuckAndroid: false,
+              playThroughEarpieceAndroid: false,
+              interruptionModeAndroid: 2, // DUCK_OTHERS — less aggressive
+            }).catch(() => {});
           }
-        } else {
-          if (soundObject) {
-            soundObject.setOnPlaybackStatusUpdate(null);
-          }
-          playNext();
         }
+
+        // 通知位置/时长更新（每次都发，UI 进度条需要）
+        emit(EVENTS.PLAYBACK_STATE_CHANGE, {
+          position: position,
+          duration: duration,
+          ...(playingChanged ? { isPlaying: status.isPlaying } : {}),
+        });
+
+        // 更新歌词高亮（后台/锁屏时不进行歌词计算，极致省电）
+        if (AppState.currentState !== 'background') {
+          const currentTimeSec = (status.positionMillis || 0) / 1000;
+          updateHighlight(currentTimeSec);
+        }
+
+        // 自动播放下一首或单曲循环
+        if (status.didJustFinish) {
+          if (playMode === 'repeat-one') {
+            logger.info('PlayerEngine', 'repeat-one didJustFinish, replaying');
+            position = 0;
+            isPlaying = true;
+            emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: true, position: 0, duration });
+            updateHighlight(0);
+            if (soundObject) {
+              soundObject.replayAsync().catch(e => {
+                logger.error('PlayerEngine', 'replayAsync error', e);
+              });
+            }
+          } else {
+            if (soundObject) {
+              soundObject.setOnPlaybackStatusUpdate(null);
+            }
+            playNext();
+          }
+        }
+      } else if (status.error) {
+        console.error(`[PlayerEngine] Playback error: ${status.error}`);
+        isPlaying = false;
+        emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position, duration });
+        showToast('播放异常');
       }
-    } else if (status.error) {
-      console.error(`[PlayerEngine] Playback error: ${status.error}`);
-      isPlaying = false;
-      emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position, duration });
-      showToast('播放异常');
+    } catch (statusErr) {
+      logger.error('PlayerEngine', 'onPlaybackStatusUpdate error', statusErr);
     }
   });
 }
@@ -354,12 +369,14 @@ export async function togglePlay() {
         isPlaying = false;
       } else {
         userPaused = false;
+        try { NativeModules.MediaModule?.resetNoisy?.(); } catch {}
         await soundObject.playAsync();
         isPlaying = true;
       }
     } else if (currentIndex >= 0 && currentIndex < playlist.length) {
       // 当前没有 soundObject（例如之前加载失败或未初始化），用户点击播放时重试当前歌曲
       userPaused = false;
+      try { NativeModules.MediaModule?.resetNoisy?.(); } catch {}
       await playTrack(currentIndex);
       return;
     }
@@ -376,6 +393,21 @@ export async function togglePlay() {
     isPlaying = false;
   }
   emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying, position, duration });
+}
+
+export async function pause() {
+  userPaused = true;
+  isPlaying = false;
+  logger.info('PlayerEngine', 'pause requested', { currentIndex });
+  try {
+    if (soundObject) {
+      await soundObject.pauseAsync();
+    }
+  } catch (e) {
+    logger.error('PlayerEngine', 'pause error', e);
+  } finally {
+    emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position, duration });
+  }
 }
 
 // =====================================================================
@@ -461,8 +493,12 @@ export async function playTrack(index) {
       return;
     }
     soundObject = new Audio.Sound();
-    await soundObject.loadAsync({ uri: playUri }, { isLooping: playMode === 'repeat-one' });
+    await soundObject.loadAsync(
+      { uri: playUri },
+      { isLooping: playMode === 'repeat-one', progressUpdateIntervalMillis: 200 }
+    );
     await soundObject.setVolumeAsync(volume);
+    isCurrentFileCached = true;
     setupPlaybackStatusUpdate();
     await soundObject.playAsync();
     isPlaying = true;
@@ -584,16 +620,18 @@ export async function playOnlineSong(song, queueIndex = -1) {
 
     // 优先使用文件缓存（复用前面已查过的 cachedFilePath，避免重复 I/O）
     let playUri = songUrlData.url;
-    let usedFileCache = false;
+    isCurrentFileCached = false;
     if (!songUrlData.isLocal && cachedFilePath) {
       playUri = cachedFilePath;
-      usedFileCache = true;
+      isCurrentFileCached = true;
+    } else if (songUrlData.isLocal) {
+      isCurrentFileCached = true;
     }
 
     // 前后台差异化策略：前台流式播放（快），后台先下载再播放（稳）
     const isBackground = AppState.currentState === 'background';
     _dbgLog(`AppState: ${isBackground ? 'background' : 'active'}, playUri: ${playUri === songUrlData.url ? 'remote' : 'local'}`);
-    if (!songUrlData.isLocal && !usedFileCache) {
+    if (!songUrlData.isLocal && !isCurrentFileCached) {
       if (isBackground) {
         // 后台：先下载到本地再播放（避免 expo-av 后台加载远程 URL 失败）
         _dbgLog('BG: downloadAndCache start');
@@ -602,7 +640,7 @@ export async function playOnlineSong(song, queueIndex = -1) {
           _dbgLog(`BG: downloadAndCache done: ${downloadedPath ? 'ok' : 'null'}`);
           if (downloadedPath) {
             playUri = downloadedPath;
-            usedFileCache = true;
+            isCurrentFileCached = true;
           }
         } catch (e) {
           _dbgLog(`BG: downloadAndCache error: ${e.message}`);
@@ -610,7 +648,10 @@ export async function playOnlineSong(song, queueIndex = -1) {
       } else {
         // 前台：直接用远程 URL 流式播放（ExoPlayer 缓冲快，几百毫秒出声）
         // 异步下载缓存，不影响当前播放速度，下次播放同一首歌走本地文件
-        downloadAndCache(platform, songId, songUrlData.url).then(() => {
+        downloadAndCache(platform, songId, songUrlData.url).then((cachedPath) => {
+          if (cachedPath && currentOnlineSong && currentOnlineSong.id === songId) {
+            isCurrentFileCached = true;
+          }
           loadSettings().then(s => {
             enforceCacheLimit(s.cacheLimitMB || 500);
           });
@@ -626,7 +667,10 @@ export async function playOnlineSong(song, queueIndex = -1) {
     const loadStart = Date.now();
     _dbgLog('loadAsync start');
     try {
-      const status = await soundObject.loadAsync({ uri }, { isLooping: isRepeatOne });
+      const status = await soundObject.loadAsync(
+        { uri },
+        { isLooping: isRepeatOne, progressUpdateIntervalMillis: 200 }
+      );
       _dbgLog(`loadAsync done: ${Date.now() - loadStart}ms`);
       // 检测酷我官方等接口返回的 11 秒假音频（防盗/VIP语音提示音频）
       if (status && status.isLoaded && status.durationMillis) {
@@ -640,11 +684,15 @@ export async function playOnlineSong(song, queueIndex = -1) {
       }
     } catch (loadErr) {
       // 文件缓存可能损坏，删除后用原始 URL 重试
-      if (usedFileCache && !loadErr.message?.includes('假试听音频')) {
+      if (isCurrentFileCached && !loadErr.message?.includes('假试听音频')) {
+        isCurrentFileCached = false;
         await deleteCachedFile(platform, songId);
         await soundObject.unloadAsync();
         soundObject = new Audio.Sound();
-        const status = await soundObject.loadAsync({ uri: songUrlData.url }, { isLooping: isRepeatOne });
+        const status = await soundObject.loadAsync(
+          { uri: songUrlData.url },
+          { isLooping: isRepeatOne, progressUpdateIntervalMillis: 200 }
+        );
         if (status && status.isLoaded && status.durationMillis && status.durationMillis <= 15000 && parseInt(song.duration || 0) > 30) {
           logger.warn('PlayerEngine', `Detected fake promo audio on fallback (${status.durationMillis}ms)`);
           await soundObject.unloadAsync();
@@ -679,7 +727,7 @@ export async function playOnlineSong(song, queueIndex = -1) {
     fetchLyrics({ ...song, songId, _platform: platform });
 
     // 已有文件缓存时，检查缓存限额
-    if (!songUrlData.isLocal && usedFileCache) {
+    if (!songUrlData.isLocal && isCurrentFileCached) {
       // 已有文件缓存，检查缓存限额
       loadSettings().then(s => {
         enforceCacheLimit(s.cacheLimitMB || 500);
@@ -951,8 +999,9 @@ export function initPlayerEngine() {
       case 'play':
         if (!isPlaying) togglePlay();
         break;
+      case 'noisy_pause':
       case 'pause':
-        if (isPlaying) togglePlay();
+        pause();
         break;
       case 'next':
         playNext();

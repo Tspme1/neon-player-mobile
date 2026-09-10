@@ -14,7 +14,7 @@ import SearchBar from '../components/SearchBar';
 import Spinner from '../components/Spinner';
 import EmptyState from '../components/EmptyState';
 import ContextMenu from '../components/ContextMenu';
-import { ChevronDownIcon, SettingsIcon } from '../components/icons';
+import { ChevronDownIcon, SettingsIcon, RadioIcon, FolderIcon, CheckCircleIcon, CloseIcon, FolderPlusIcon, DownloadIcon, PlayIcon } from '../components/icons';
 
 const SEARCH_SOURCES = [
   { id: 'netease', label: '网易云音乐' },
@@ -303,6 +303,13 @@ export default function OnlineScreen() {
     <View style={styles.container}>
       <View style={styles.header}>
         <Text style={[styles.title, { color: colors.textPrimary }]}>在线搜索</Text>
+        <View style={{ flex: 1 }} />
+        <TouchableOpacity
+          style={[styles.settingsBtn, { borderColor: colors.border }]}
+          onPress={() => usePlayerStore.setState({ settingsVisible: true })}
+        >
+          <SettingsIcon width={16} height={16} color={colors.textSecondary} />
+        </TouchableOpacity>
       </View>
       <View style={styles.searchWrap}>
         <SearchBar
@@ -420,9 +427,12 @@ export default function OnlineScreen() {
         <View style={styles.mgmtOverlay}>
           <View style={[styles.mgmtDialog, { backgroundColor: colors.bgSecondary }]}>
             <View style={[styles.mgmtHeader, { borderBottomColor: colors.border }]}>
-              <Text style={[styles.mgmtTitle, { color: colors.textPrimary }]}>🎵 音源管理</Text>
-              <TouchableOpacity onPress={() => setSourceMgmtVisible(false)}>
-                <Text style={[styles.closeText, { color: colors.textMuted }]}>×</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <RadioIcon size={20} color={colors.accent} />
+                <Text style={[styles.mgmtTitle, { color: colors.textPrimary }]}>音源管理</Text>
+              </View>
+              <TouchableOpacity onPress={() => setSourceMgmtVisible(false)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <CloseIcon size={20} color={colors.textMuted} />
               </TouchableOpacity>
             </View>
             <ScrollView style={styles.mgmtBody}>
@@ -450,11 +460,12 @@ export default function OnlineScreen() {
                 </TouchableOpacity>
               </View>
               <TouchableOpacity
-                style={[styles.fileImportBtn, { borderColor: colors.accent, opacity: importing ? 0.4 : 1 }]}
+                style={[styles.fileImportBtn, { borderColor: colors.accent, opacity: importing ? 0.4 : 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 }]}
                 onPress={handleImportFile}
                 disabled={importing}
               >
-                <Text style={[styles.fileImportBtnText, { color: colors.accent }]}>📁 从文件导入 (.js)</Text>
+                <FolderIcon size={16} color={colors.accent} />
+                <Text style={[styles.fileImportBtnText, { color: colors.accent }]}>从文件导入 (.js)</Text>
               </TouchableOpacity>
 
               {/* 自定义音源列表 */}
@@ -466,9 +477,7 @@ export default function OnlineScreen() {
               ) : (
                 customSources.map((src, idx) => (
                   <View key={src.id || idx} style={[styles.sourceRow2, { borderColor: colors.border, backgroundColor: colors.bgTertiary }]}>
-                    <Text style={{ color: src.enabled !== false ? '#1abc9c' : colors.textMuted, fontSize: 16 }}>
-                      {src.enabled !== false ? '✅' : '⭕'}
-                    </Text>
+                    <CheckCircleIcon size={18} color={src.enabled !== false ? '#1abc9c' : colors.textMuted} />
                     <View style={styles.sourceInfo}>
                       <Text style={[styles.sourceName, { color: colors.textPrimary }]}>{src.name}</Text>
                       <Text style={[styles.sourceDesc, { color: colors.textMuted }]}>{src.description || src.author || ''}</Text>
@@ -502,10 +511,10 @@ export default function OnlineScreen() {
         x={menuPos.x}
         y={menuPos.y}
         actions={[
-          { label: '📑 添加到歌单', onPress: () => usePlayerStore.getState().openAddToPlaylist(menuTrack) },
-          { label: '⬇ 下载', onPress: () => handleDownload(menuTrack) },
-          { label: '▶ 下一首播放', onPress: () => handlePlayNext(menuTrack, menuIndex) },
-          { label: '📂 打开下载路径', onPress: () => handleOpenDownloadDir() },
+          { label: '添加到歌单', icon: FolderPlusIcon, onPress: () => usePlayerStore.getState().openAddToPlaylist(menuTrack) },
+          { label: '下载', icon: DownloadIcon, onPress: () => handleDownload(menuTrack) },
+          { label: '下一首播放', icon: PlayIcon, onPress: () => handlePlayNext(menuTrack, menuIndex) },
+          { label: '打开下载路径', icon: FolderIcon, onPress: () => handleOpenDownloadDir() },
         ]}
       />
     </View>
@@ -515,9 +524,20 @@ export default function OnlineScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   header: {
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingHorizontal: 16,
     paddingTop: HEADER_PADDING_TOP,
     paddingBottom: 8,
+  },
+  settingsBtn: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 8,
+    borderWidth: 1,
+    flexShrink: 0,
   },
   title: { fontSize: 22, fontWeight: '700' },
   searchWrap: { paddingHorizontal: 16, paddingBottom: 8 },

@@ -5,6 +5,7 @@ import {
   ActivityIndicator, Animated, Easing
 } from 'react-native';
 import { useTheme } from '../theme/useTheme';
+import { RefreshCwIcon, AlertCircleIcon, CheckIcon } from './icons';
 import {
   downloadApk, installApk, setSkippedVersion
 } from '../core/updater';
@@ -77,9 +78,12 @@ export default function UpdateDialog({ visible, updateInfo, onClose }) {
         <View style={[styles.dialog, { backgroundColor: colors.bgPrimary }]}>
           {/* 标题 */}
           <View style={styles.header}>
-            <Text style={[styles.title, { color: colors.textPrimary }]}>
-              🔄 发现新版本
-            </Text>
+            <View style={styles.titleRow}>
+              <RefreshCwIcon size={20} color={colors.accent} />
+              <Text style={[styles.title, { color: colors.textPrimary }]}>
+                发现新版本
+              </Text>
+            </View>
             <Text style={[styles.version, { color: colors.accent }]}>
               v{updateInfo.versionName}
             </Text>
@@ -128,9 +132,12 @@ export default function UpdateDialog({ visible, updateInfo, onClose }) {
 
           {/* 错误信息 */}
           {error ? (
-            <Text style={[styles.errorText, { color: '#e74c3c' }]}>
-              ⚠ {error}
-            </Text>
+            <View style={styles.errorRow}>
+              <AlertCircleIcon size={14} color="#e74c3c" />
+              <Text style={[styles.errorText, { color: '#e74c3c' }]}>
+                {error}
+              </Text>
+            </View>
           ) : null}
 
           {/* "不再提醒" 选项 — 仅非强制更新时显示 */}
@@ -145,7 +152,7 @@ export default function UpdateDialog({ visible, updateInfo, onClose }) {
                   ? { backgroundColor: colors.accent, borderColor: colors.accent }
                   : { borderColor: colors.border }
               ]}>
-                {dontRemind ? <Text style={styles.checkmark}>✓</Text> : null}
+                {dontRemind ? <CheckIcon size={12} color="#fff" strokeWidth={3} /> : null}
               </View>
               <Text style={[styles.checkLabel, { color: colors.textSecondary }]}>
                 不再提醒此版本
@@ -205,6 +212,11 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginBottom: 16,
   },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
   title: {
     fontSize: 18,
     fontWeight: '700',
@@ -245,9 +257,14 @@ const styles = StyleSheet.create({
     height: '100%',
     borderRadius: 3,
   },
+  errorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 12,
+  },
   errorText: {
     fontSize: 13,
-    marginBottom: 12,
   },
   checkRow: {
     flexDirection: 'row',

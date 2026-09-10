@@ -12,10 +12,12 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.AudioManager
 import android.media.session.MediaSessionManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.util.Log
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
@@ -102,6 +104,22 @@ class MediaService : Service() {
         }
     }
 
+    // 耳机断开/蓝牙耳机关闭时自动暂停
+    private var noisyReceiverRegistered = false
+    private val becomingNoisyReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
+                MediaModule.lastNoisyTime = System.currentTimeMillis()
+                Log.i("MediaService", "ACTION_AUDIO_BECOMING_NOISY received! Disconnecting headset, sending noisy_pause & pause")
+                sendControlEvent("noisy_pause")
+                sendControlEvent("pause")
+                currentIsPlaying = false
+                updateMediaSession()
+                updateNotification()
+            }
+        }
+    }
+
     private val mediaSessionCallback = object : MediaSessionCompat.Callback() {
         override fun onPlay() { sendControlEvent("play") }
         override fun onPause() { sendControlEvent("pause") }
@@ -141,6 +159,7 @@ class MediaService : Service() {
 
         // BroadcastReceiver for notification actions
         ensureBroadcastReceiver()
+        registerNoisyReceiver()
 
         // OkHttpClient for artwork loading with 20MB disk cache
         httpClient = OkHttpClient.Builder()
@@ -166,6 +185,27 @@ class MediaService : Service() {
             registerReceiver(broadcastReceiver, filter)
         }
         receiverRegistered = true
+    }
+
+    private fun registerNoisyReceiver() {
+        if (noisyReceiverRegistered) return
+        val filter = IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(becomingNoisyReceiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(becomingNoisyReceiver, filter)
+        }
+        noisyReceiverRegistered = true
+    }
+
+    private fun unregisterNoisyReceiver() {
+        if (!noisyReceiverRegistered) return
+        try {
+            unregisterReceiver(becomingNoisyReceiver)
+        } catch (e: Exception) {
+            // silent
+        }
+        noisyReceiverRegistered = false
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -325,6 +365,7 @@ class MediaService : Service() {
             try { unregisterReceiver(broadcastReceiver) } catch (e: Exception) {}
             receiverRegistered = false
         }
+        unregisterNoisyReceiver()
         mediaSession?.let {
             it.isActive = false
             it.release()

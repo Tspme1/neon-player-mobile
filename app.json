@@ -2,7 +2,7 @@
   "expo": {
     "name": "Neon Player",
     "slug": "tsp",
-    "version": "1.00.013",
+    "version": "1.00.014",
     "orientation": "portrait",
     "icon": "./assets/app-icon.png",
     "userInterfaceStyle": "automatic",

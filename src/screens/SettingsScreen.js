@@ -1,10 +1,11 @@
 // 设置页 — 对应 PC 版设置弹窗
 import React, { useState, useEffect } from 'react';
 import {
-  View, Text, TouchableOpacity, StyleSheet, ScrollView, Alert, TextInput, Share
+  View, Text, TouchableOpacity, StyleSheet, ScrollView, Alert, TextInput, Share, NativeModules
 } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as DocumentPicker from 'expo-document-picker';
+import * as Sharing from 'expo-sharing';
 
 import { HEADER_PADDING_TOP } from '../theme/safearea';
 import { useTheme } from '../theme/useTheme';
@@ -13,7 +14,11 @@ import {
   loadFavorites, saveFavorites, loadSettings, saveSettings,
   loadCustomPlaylists, saveCustomPlaylists, parseImportData,
 } from '../core/storage';
-import { ChevronLeftIcon, TrashIcon } from '../components/icons';
+import {
+  ChevronLeftIcon, TrashIcon, SettingsIcon, PaletteIcon, HeadphonesIcon,
+  HardDriveIcon, RadioIcon, DatabaseIcon, UploadIcon, DownloadIcon,
+  FolderIcon, RefreshCwIcon, CheckCircleIcon, CheckIcon, AlertCircleIcon
+} from '../components/icons';
 import { importFromUrl, importFromFile, deleteSource, setSourceEnabled, updateSource, loadRegistry } from '../core/source-manager';
 import { getCacheSize, clearCache } from '../core/cache-manager';
 import { formatCacheSize } from '../utils/format';
@@ -90,7 +95,7 @@ export default function SettingsScreen({ visible, onClose }) {
   const handleClearCache = () => {
     Alert.alert(
       '清理缓存',
-      '确定要清理音乐缓存与运行日志吗？',
+      '确定要清理音乐缓存吗？',
       [
         { text: '取消', style: 'cancel' },
         {
@@ -98,8 +103,7 @@ export default function SettingsScreen({ visible, onClose }) {
           onPress: async () => {
             await clearCache();
             setCacheSize('0 B (0 个文件)');
-            setLogSize('0 B');
-            setToast('音乐缓存与运行日志已清理');
+            setToast('音乐缓存已清理');
           }
         }
       ]
@@ -249,12 +253,57 @@ export default function SettingsScreen({ visible, onClose }) {
       playlists: customList,
     }, null, 2);
     try {
-      await Share.share({
-        message: json,
-        title: 'Neon Player 全量数据备份',
-      });
+      const now = new Date();
+      const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}`;
+      const fileName = `neon_player_backup_${dateStr}.json`;
+
+      let savedPath = '';
+      if (NativeModules.UpdaterModule?.saveFileToDownloads) {
+        savedPath = await NativeModules.UpdaterModule.saveFileToDownloads(
+          fileName,
+          json,
+          'NeonPlayer',
+          'application/json'
+        );
+      }
+
+      // 同时写入缓存目录，以备分享需要
+      const fileUri = `${FileSystem.cacheDirectory}${fileName}`;
+      await FileSystem.writeAsStringAsync(fileUri, json, { encoding: 'utf8' });
+
+      Alert.alert(
+        '备份成功',
+        `备份数据已保存至：\n${savedPath || 'Download/NeonPlayer/' + fileName}`,
+        [
+          { text: '确定', style: 'default' },
+          {
+            text: '打开下载目录',
+            onPress: () => {
+              if (NativeModules.UpdaterModule?.openDownloadFolder) {
+                NativeModules.UpdaterModule.openDownloadFolder();
+              }
+            },
+          },
+          {
+            text: '分享到其他应用',
+            onPress: async () => {
+              try {
+                if (await Sharing.isAvailableAsync()) {
+                  await Sharing.shareAsync(fileUri, {
+                    mimeType: 'application/json',
+                    dialogTitle: '分享 Neon Player 备份数据',
+                    UTI: 'public.json',
+                  });
+                }
+              } catch (err) {
+                setToast('分享失败: ' + (err.message || ''));
+              }
+            },
+          },
+        ]
+      );
     } catch (e) {
-      setToast('导出失败: ' + (e.message || ''));
+      setToast('备份失败: ' + (e.message || ''));
     }
   };
 
@@ -397,14 +446,20 @@ export default function SettingsScreen({ visible, onClose }) {
             <TouchableOpacity onPress={onClose} style={styles.backBtn}>
               <ChevronLeftIcon width={20} height={20} color={colors.textPrimary} />
             </TouchableOpacity>
-            <Text style={[styles.title, { color: colors.textPrimary }]}>⚙ 设置</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <SettingsIcon width={18} height={18} color={colors.accent} />
+              <Text style={[styles.title, { color: colors.textPrimary }]}>设置</Text>
+            </View>
             <View style={{ width: 36 }} />
           </View>
 
           <ScrollView style={styles.body} contentContainerStyle={{ paddingBottom: 40 }}>
             {/* === 主题模式 === */}
             <View style={styles.section}>
-              <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>🎨 主题模式</Text>
+              <View style={styles.sectionTitleRow}>
+                <PaletteIcon width={17} height={17} color={colors.accent} />
+                <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>主题模式</Text>
+              </View>
               <View style={[styles.row, { borderColor: colors.border }]}>
                 <Text style={[styles.rowLabel, { color: colors.textSecondary }]}>外观</Text>
                 <View style={{ flexDirection: 'row', gap: 8 }}>
@@ -438,7 +493,10 @@ export default function SettingsScreen({ visible, onClose }) {
 
             {/* === 播放设置 === */}
             <View style={styles.section}>
-              <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>🎧 播放设置</Text>
+              <View style={styles.sectionTitleRow}>
+                <HeadphonesIcon width={17} height={17} color={colors.accent} />
+                <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>播放设置</Text>
+              </View>
               <View style={[styles.row, { borderColor: colors.border }]}>
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.rowLabel, { color: colors.textSecondary }]}>通知栏媒体控件</Text>
@@ -481,7 +539,10 @@ export default function SettingsScreen({ visible, onClose }) {
 
             {/* === 音乐缓存 === */}
             <View style={styles.section}>
-              <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>📦 音乐缓存</Text>
+              <View style={styles.sectionTitleRow}>
+                <HardDriveIcon width={17} height={17} color={colors.accent} />
+                <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>音乐缓存</Text>
+              </View>
               <View style={[styles.row, { borderColor: 'transparent' }]}>
                 <Text style={[styles.rowLabel, { color: colors.textSecondary }]}>当前缓存大小</Text>
                 <Text style={[styles.rowValue, { color: colors.textMuted }]}>{cacheSize}</Text>
@@ -526,13 +587,15 @@ export default function SettingsScreen({ visible, onClose }) {
                   style={[styles.actionBtn, { flex: 1, backgroundColor: colors.bgTertiary, borderWidth: 1, borderColor: colors.border }]}
                   onPress={handleShareLog}
                 >
-                  <Text style={[styles.actionBtnText, { color: colors.textPrimary }]}>📤 导出/分享日志</Text>
+                  <UploadIcon width={15} height={15} color={colors.textPrimary} />
+                  <Text style={[styles.actionBtnText, { color: colors.textPrimary }]}>导出/分享日志</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={[styles.actionBtn, { flex: 1, backgroundColor: colors.bgTertiary, borderWidth: 1, borderColor: colors.border }]}
                   onPress={handleClearLogs}
                 >
-                  <Text style={[styles.actionBtnText, { color: colors.textSecondary }]}>🗑️ 清空日志</Text>
+                  <TrashIcon width={15} height={15} color={colors.textSecondary} />
+                  <Text style={[styles.actionBtnText, { color: colors.textSecondary }]}>清空日志</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -541,11 +604,14 @@ export default function SettingsScreen({ visible, onClose }) {
 
             {/* === 音源管理 === */}
             <View style={styles.section}>
-              <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>🎵 音源管理</Text>
+              <View style={styles.sectionTitleRow}>
+                <RadioIcon width={17} height={17} color={colors.accent} />
+                <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>音源管理</Text>
+              </View>
               <Text style={[styles.subLabel, { color: colors.textSecondary }]}>内置音源</Text>
               {BUILTIN_SOURCES.map(src => (
                 <View key={src.id} style={[styles.sourceRow, { borderColor: colors.border, backgroundColor: colors.bgTertiary }]}>
-                  <Text style={{ color: '#1abc9c', fontSize: 16 }}>✅</Text>
+                  <CheckCircleIcon width={16} height={16} color="#1abc9c" />
                   <Text style={[styles.sourceName, { color: colors.textPrimary }]}>{src.label}</Text>
                   <Text style={[styles.sourceTag, { color: colors.textMuted }]}>内置</Text>
                 </View>
@@ -575,8 +641,9 @@ export default function SettingsScreen({ visible, onClose }) {
                 onPress={handleImportFile}
                 disabled={importing}
               >
+                <FolderIcon width={16} height={16} color={colors.accent} />
                 <Text style={[styles.fileImportBtnText, { color: colors.accent }]}>
-                  📁 从文件导入 (.js)
+                  从文件导入 (.js)
                 </Text>
               </TouchableOpacity>
               <Text style={[styles.subLabel, { color: colors.textSecondary, marginTop: 12 }]}>自定义音源</Text>
@@ -587,9 +654,7 @@ export default function SettingsScreen({ visible, onClose }) {
               ) : (
                 customSources.map((src, idx) => (
                   <View key={src.id || idx} style={[styles.sourceRow, { borderColor: colors.border, backgroundColor: colors.bgTertiary }]}>
-                    <Text style={{ color: src.enabled !== false ? '#1abc9c' : colors.textMuted, fontSize: 16 }}>
-                      {src.enabled !== false ? '✅' : '⭕'}
-                    </Text>
+                    <CheckCircleIcon width={16} height={16} color={src.enabled !== false ? '#1abc9c' : colors.textMuted} />
                     <View style={styles.sourceInfo}>
                       <Text style={[styles.sourceName, { color: colors.textPrimary }]}>{src.name}</Text>
                       <Text style={[styles.sourceDesc, { color: colors.textMuted }]}>{src.description || src.author || ''}</Text>
@@ -618,18 +683,23 @@ export default function SettingsScreen({ visible, onClose }) {
 
             {/* === 数据备份与恢复 === */}
             <View style={styles.section}>
-              <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>💾 歌单与数据备份</Text>
+              <View style={styles.sectionTitleRow}>
+                <DatabaseIcon width={17} height={17} color={colors.accent} />
+                <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>歌单与数据备份</Text>
+              </View>
               <TouchableOpacity
                 style={[styles.actionBtn, { backgroundColor: colors.accent }]}
                 onPress={handleExportFavorites}
               >
-                <Text style={styles.actionBtnTextWhite}>📤 备份全部数据（喜欢 + 歌单）</Text>
+                <UploadIcon width={16} height={16} color="#fff" />
+                <Text style={styles.actionBtnTextWhite}>备份全部数据（喜欢 + 歌单）</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.actionBtn, { backgroundColor: colors.bgTertiary, borderWidth: 1, borderColor: colors.border, marginTop: 8 }]}
                 onPress={handleImportFavorites}
               >
-                <Text style={[styles.actionBtnText, { color: colors.textPrimary }]}>📥 恢复/导入数据（歌单/全量备份）</Text>
+                <DownloadIcon width={16} height={16} color={colors.textPrimary} />
+                <Text style={[styles.actionBtnText, { color: colors.textPrimary }]}>恢复/导入数据（歌单/全量备份）</Text>
               </TouchableOpacity>
             </View>
 
@@ -637,7 +707,10 @@ export default function SettingsScreen({ visible, onClose }) {
 
             {/* === 关于 === */}
             <View style={styles.section}>
-              <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>ℹ 关于</Text>
+              <View style={styles.sectionTitleRow}>
+                <AlertCircleIcon width={17} height={17} color={colors.accent} />
+                <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>关于</Text>
+              </View>
               <View style={[styles.row, { borderColor: colors.border }]}>
                 <Text style={[styles.rowLabel, { color: colors.textSecondary }]}>当前版本</Text>
                 <Text style={[styles.rowValue, { color: colors.textMuted }]}>v{appVersion}</Text>
@@ -647,8 +720,9 @@ export default function SettingsScreen({ visible, onClose }) {
                 onPress={handleCheckUpdate}
                 disabled={checkingUpdate}
               >
+                <RefreshCwIcon width={15} height={15} color="#fff" />
                 <Text style={styles.actionBtnTextWhite}>
-                  {checkingUpdate ? '检查中...' : '🔍 检查更新'}
+                  {checkingUpdate ? '检查中...' : '检查更新'}
                 </Text>
               </TouchableOpacity>
               <Text style={[styles.aboutText, { color: colors.textMuted, marginTop: 12 }]}>
@@ -699,10 +773,15 @@ const styles = StyleSheet.create({
     paddingTop: 16,
     paddingBottom: 8,
   },
+  sectionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 12,
+  },
   sectionTitle: {
     fontSize: 15,
     fontWeight: '600',
-    marginBottom: 12,
   },
   row: {
     flexDirection: 'row',
@@ -815,7 +894,10 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   fileImportBtn: {
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
     paddingVertical: 10,
     borderRadius: 8,
     borderWidth: 1,

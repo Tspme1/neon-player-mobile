@@ -1,7 +1,17 @@
-// 歌词解析 — 从桌面端 lyrics.js 移植
+// 歌词解析 — 从桌面端 lyrics.js 移植并增强标准 LRC [offset] 解析与动态前瞻补偿
+
+// 前瞻时间补偿量（秒）：抵消 Android AudioTrack 硬件缓冲延迟(~80-100ms)与 ScrollView 滚动动画过渡(~200-250ms)
+const ANTICIPATION_OFFSET_SEC = 0.25;
 
 export function parseLyrics(lrc, tlyric) {
   if (!lrc || typeof lrc !== 'string') return [];
+
+  // 解析 [offset:+/-ms] 全局偏移量（毫秒），正数延后，负数提前
+  let offsetSec = 0;
+  const offsetMatch = lrc.match(/\[offset:\s*([+-]?\d+)\s*\]/i);
+  if (offsetMatch) {
+    offsetSec = (parseInt(offsetMatch[1], 10) || 0) / 1000;
+  }
 
   const lines = lrc.split(/\r?\n/);
   const translations = {};
@@ -31,7 +41,7 @@ export function parseLyrics(lrc, tlyric) {
       timeTagRegex.lastIndex = 0;
       let m;
       while ((m = timeTagRegex.exec(line)) !== null) {
-        const time = parseTime(m[1], m[2], m[3]);
+        const time = Math.max(0, parseTime(m[1], m[2], m[3]) + offsetSec);
         translations[time.toFixed(2)] = text;
       }
     });
@@ -45,7 +55,7 @@ export function parseLyrics(lrc, tlyric) {
     timeTagRegex.lastIndex = 0;
     let m;
     while ((m = timeTagRegex.exec(line)) !== null) {
-      const time = parseTime(m[1], m[2], m[3]);
+      const time = Math.max(0, parseTime(m[1], m[2], m[3]) + offsetSec);
       result.push({
         time: time,
         text: text,
@@ -58,9 +68,11 @@ export function parseLyrics(lrc, tlyric) {
 }
 
 export function findCurrentLyricIndex(lyricsData, currentTime) {
+  if (!lyricsData || lyricsData.length === 0) return -1;
+  const effectiveTime = currentTime + ANTICIPATION_OFFSET_SEC;
   let newIndex = -1;
   for (let i = 0; i < lyricsData.length; i++) {
-    if (currentTime >= lyricsData[i].time) {
+    if (effectiveTime >= lyricsData[i].time) {
       newIndex = i;
     } else {
       break;

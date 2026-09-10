@@ -351,21 +351,40 @@ async function searchFallbackLyrics(name, artist) {
     console.log(`[SourceManager] searchFallbackLyrics keyword: "${keyword}" (original: "${name}" - "${artist}")`);
 
     const cleanTargetName = name.replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '').toLowerCase();
+    const rawTargetLower = (name || '').toLowerCase();
+    const noiseKeywords = ['伴奏', 'instrumental', 'inst', '纯音乐', 'dj版', 'remix'];
+
+    const isCandidateGood = (s) => {
+      const sNameClean = (s.name || '').replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '').toLowerCase();
+      if (!sNameClean) return false;
+
+      // 排除干扰版本（原名不带伴奏/DJ，但候选带伴奏/DJ）
+      for (const noise of noiseKeywords) {
+        if (!rawTargetLower.includes(noise) && sNameClean.includes(noise)) return false;
+      }
+
+      const nameMatches = sNameClean === cleanTargetName ||
+                          sNameClean.startsWith(cleanTargetName) ||
+                          cleanTargetName.startsWith(sNameClean) ||
+                          sNameClean.includes(cleanTargetName);
+      if (!nameMatches) return false;
+
+      if (cleanArtist) {
+        const sArtistClean = (s.artist || '').replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '').toLowerCase();
+        if (!sArtistClean) return false;
+        const artistMatches = sArtistClean.includes(cleanArtist.toLowerCase()) || cleanArtist.toLowerCase().includes(sArtistClean);
+        if (!artistMatches) return false;
+      }
+      return true;
+    };
 
     // 2. 优先尝试酷狗搜索（曲库与歌词匹配度最高，覆盖ACG/游戏原声及小众音乐）
     try {
-      const kgSongs = await kugouSearch(keyword, 0, 5);
+      const kgSongs = await kugouSearch(keyword, 0, 8);
       if (kgSongs && kgSongs.length > 0) {
-        const kgMatch = kgSongs.find(s => {
-          const sNameClean = (s.name || '').replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '').toLowerCase();
-          const nameMatches = sNameClean.includes(cleanTargetName) || cleanTargetName.includes(sNameClean);
-          if (!nameMatches) return false;
-          if (cleanArtist) {
-            const sArtistClean = (s.artist || '').replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '').toLowerCase();
-            return sArtistClean.includes(cleanArtist.toLowerCase()) || cleanArtist.toLowerCase().includes(sArtistClean);
-          }
-          return true;
-        });
+        const matchingSongs = kgSongs.filter(isCandidateGood);
+        // 优先完全匹配歌名的
+        const kgMatch = matchingSongs.find(s => (s.name || '').replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '').toLowerCase() === cleanTargetName) || matchingSongs[0];
 
         if (kgMatch) {
           console.log(`[SourceManager] searchFallbackLyrics KuGou match found: ${kgMatch.name} - ${kgMatch.artist}`);
@@ -381,18 +400,11 @@ async function searchFallbackLyrics(name, artist) {
 
     // 3. 尝试网易云搜索（带严格歌名与歌手匹配校验，严禁盲目取首条）
     try {
-      const wySongs = await neteaseSearch(keyword, 5);
+      const wySongs = await neteaseSearch(keyword, 8);
       if (wySongs && wySongs.length > 0) {
-        const wyMatch = wySongs.find(s => {
-          const sNameClean = (s.name || '').replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '').toLowerCase();
-          const nameMatches = sNameClean.includes(cleanTargetName) || cleanTargetName.includes(sNameClean);
-          if (!nameMatches) return false;
-          if (cleanArtist) {
-            const sArtistClean = (s.artist || '').replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '').toLowerCase();
-            return sArtistClean.includes(cleanArtist.toLowerCase()) || cleanArtist.toLowerCase().includes(sArtistClean);
-          }
-          return true;
-        });
+        const matchingSongs = wySongs.filter(isCandidateGood);
+        // 优先完全匹配歌名的
+        const wyMatch = matchingSongs.find(s => (s.name || '').replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '').toLowerCase() === cleanTargetName) || matchingSongs[0];
 
         if (wyMatch) {
           console.log(`[SourceManager] searchFallbackLyrics NetEase match found: ${wyMatch.name} - ${wyMatch.artist}`);

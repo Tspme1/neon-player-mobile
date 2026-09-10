@@ -293,6 +293,17 @@ export async function getLxMusicUrlWebView(sourceId, songId, quality = '128k', p
   return null;
 }
 
+// ====== 校验是否是合法 LRC 歌词文本 ======
+function isLrcContent(str) {
+  if (!str || typeof str !== 'string') return false;
+  const trimmed = str.trim();
+  // 排除错误返回的音频直链、JSON 错误串或空文本
+  if (/^https?:\/\//i.test(trimmed)) return false;
+  // 必须包含 LRC 规范的时间标签 [mm:ss
+  if (!/\[\d{1,2}:\d{2}/.test(trimmed)) return false;
+  return true;
+}
+
 // ====== 请求歌词 (LX 音源) ======
 export async function getLxLyricWebView(sourceId, song, platform = 'netease') {
   if (!song) return null;
@@ -313,14 +324,37 @@ export async function getLxLyricWebView(sourceId, song, platform = 'netease') {
   };
   const lxSource = lxSourceMap[platform] || 'wy';
 
+  // 检查音源配置是否声明支持 lyric
+  try {
+    const entries = await loadRegistry();
+    const entry = entries.find(e => e.id === sourceId);
+    if (entry && entry.sources && entry.sources[lxSource]) {
+      const actions = entry.sources[lxSource].actions || [];
+      if (actions.length > 0 && !actions.includes('lyric')) {
+        // 音源明确未声明支持 lyric，直接返回 null，避免其把 lyric 当成 musicUrl 执行
+        return null;
+      }
+    }
+  } catch {}
+
+  const rawStr = String(songId || (song && (song.songId || song.id)) || '');
+  const cleanHash = (rawStr.includes('|') ? rawStr.split('|')[0] : rawStr).toUpperCase();
+  const cleanRid = rawStr.replace('MUSIC_', '');
+  const songName = (song && (song.name || song.title)) || '';
+  const songArtist = (song && (song.artist || (song.artists && song.artists.map(a => a.name).join(', ')))) || '';
+
   const musicInfo = {
-    id: `${lxSource}_${songId}`,
+    id: lxSource === 'kg' ? cleanHash : (lxSource === 'kw' ? cleanRid : rawStr),
     source: lxSource,
-    meta: { songId: String(songId), albumId: song.albumId || '', albumName: song.album || '' },
-    songmid: String(song.songmid || songId),
-    hash: String(song.hash || songId),
-    name: song.name || '',
-    singer: song.artist || '',
+    meta: {
+      songId: lxSource === 'kw' ? cleanRid : (lxSource === 'kg' ? cleanHash : rawStr),
+      albumId: (song && song.albumId) || '',
+      albumName: (song && (song.album || (song.al && song.al.name))) || '',
+    },
+    songmid: lxSource === 'kw' ? cleanRid : (lxSource === 'kg' ? cleanHash : rawStr),
+    hash: lxSource === 'kg' ? cleanHash : rawStr,
+    name: songName,
+    singer: songArtist,
   };
 
   try {
@@ -330,10 +364,10 @@ export async function getLxLyricWebView(sourceId, song, platform = 'netease') {
       const tlyric = result.tlyric || '';
       const rlyric = result.rlyric || '';
       const lxlyric = result.lxlyric || '';
-      if (lrc) {
+      if (isLrcContent(lrc)) {
         return { lrc, tlyric, rlyric, lxlyric };
       }
-    } else if (typeof result === 'string' && result.trim()) {
+    } else if (typeof result === 'string' && isLrcContent(result)) {
       return { lrc: result, tlyric: '' };
     }
   } catch (e) {

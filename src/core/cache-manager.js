@@ -194,9 +194,7 @@ export async function clearCache() {
     for (const file of files) {
       await FileSystem.deleteAsync(dir + file, { idempotent: true });
     }
-    // 联动清除运行日志
-    await logger.clearLogs();
-    logger.info('CacheManager', 'Cache and logs cleared completely');
+    logger.info('CacheManager', 'Cache cleared completely');
     return true;
   } catch (e) {
     logger.error('CacheManager', 'clearCache error', e);

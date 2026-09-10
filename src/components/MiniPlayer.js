@@ -2,17 +2,17 @@
 import React, { useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Image } from 'react-native';
 import { useTheme } from '../theme/useTheme';
-import { PlayIcon, PauseIcon, NextIcon, HeartIcon } from './icons';
+import { PlayIcon, PauseIcon, NextIcon, HeartIcon, MusicIcon } from './icons';
 import { usePlayerStore } from '../store/useStore';
 import { isFavorited as checkFavorited, toggleFavorite as toggleFav } from '../core/storage';
 
 // 封面缩略图：key=coverUri 重挂载时失败标记自动重置
-function CoverThumb({ uri, bg }) {
+function CoverThumb({ uri, bg, iconColor }) {
   const [failed, setFailed] = useState(false);
   if (!uri || failed) {
     return (
-      <View style={[styles.cover, { backgroundColor: bg }]}>
-        <Text style={{ fontSize: 20 }}>🎵</Text>
+      <View style={[styles.cover, { backgroundColor: bg, alignItems: 'center', justifyContent: 'center' }]}>
+        <MusicIcon width={22} height={22} color={iconColor || '#888'} strokeWidth={1.8} />
       </View>
     );
   }
@@ -60,7 +60,7 @@ export default function MiniPlayer({ onPress }) {
       activeOpacity={0.9}
     >
       {/* Cover（有封面显示图片，失败回落占位；key 切换自动重置） */}
-      <CoverThumb key={coverUri || 'none'} uri={coverUri} bg={colors.bgTertiary} />
+      <CoverThumb key={coverUri || 'none'} uri={coverUri} bg={colors.bgTertiary} iconColor={colors.textMuted} />
 
       {/* Info */}
       <View style={styles.info}>

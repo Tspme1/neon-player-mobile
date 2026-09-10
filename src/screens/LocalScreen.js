@@ -10,7 +10,7 @@ import { usePlayerStore } from '../store/useStore';
 import { savePlaylist, loadPlaylist, toggleFavorite, isFavorited } from '../core/storage';
 import TrackItem from '../components/TrackItem';
 import EmptyState from '../components/EmptyState';
-import { PlusIcon } from '../components/icons';
+import { PlusIcon, FolderPlusIcon, PlayIcon, TrashIcon, SettingsIcon } from '../components/icons';
 import ContextMenu from '../components/ContextMenu';
 import logger from '../core/logger';
 
@@ -183,6 +183,12 @@ export default function LocalScreen() {
           <PlusIcon width={16} height={16} color={colors.accent} />
           <Text style={[styles.addBtnText, { color: colors.accent }]}>添加</Text>
         </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.settingsBtn, { borderColor: colors.border }]}
+          onPress={() => usePlayerStore.setState({ settingsVisible: true })}
+        >
+          <SettingsIcon width={16} height={16} color={colors.textSecondary} />
+        </TouchableOpacity>
       </View>
       {localLibrary.length === 0 ? (
         <EmptyState icon="📁" title="还没有本地音乐" hint="点击右上角添加音频文件" />
@@ -199,9 +205,9 @@ export default function LocalScreen() {
         onClose={() => setMenuVisible(false)}
         title={menuTrack?.name || ''}
         actions={[
-          { label: '📑 添加到歌单', onPress: () => usePlayerStore.getState().openAddToPlaylist(menuTrack) },
-          { label: '▶ 下一首播放', onPress: () => handlePlayNext(menuIndex) },
-          { label: '🗑 删除', onPress: () => handleDelete(menuIndex), destructive: true },
+          { label: '添加到歌单', icon: FolderPlusIcon, onPress: () => usePlayerStore.getState().openAddToPlaylist(menuTrack) },
+          { label: '下一首播放', icon: PlayIcon, onPress: () => handlePlayNext(menuIndex) },
+          { label: '删除', icon: TrashIcon, onPress: () => handleDelete(menuIndex), destructive: true },
         ]}
       />
     </View>
@@ -230,4 +236,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   addBtnText: { fontSize: 13, fontWeight: '600' },
+  settingsBtn: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 8,
+    borderWidth: 1,
+    flexShrink: 0,
+  },
 });

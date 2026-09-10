@@ -1,11 +1,15 @@
 package com.neon.player.mobile.media
 
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.media.AudioManager
 import android.os.Build
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.facebook.react.bridge.*
+import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.neon.player.mobile.media.MediaService
 import okhttp3.Cookie
 import okhttp3.CookieJar
@@ -31,12 +35,47 @@ class MediaModule(reactContext: ReactApplicationContext) :
         const val EXTRA_IS_PLAYING = "isPlaying"
         const val EXTRA_POSITION = "position"
         const val EXTRA_IS_FAVORITED = "isFavorited"
+
+        // 全局耳机断开/拔出时间戳
+        @Volatile
+        var lastNoisyTime = 0L
     }
 
     private var isServiceRunning = false
+    private var noisyReceiverRegistered = false
+
+    private val noisyReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
+                lastNoisyTime = System.currentTimeMillis()
+                Log.i("MediaModule", "ACTION_AUDIO_BECOMING_NOISY received! (lastNoisyTime=$lastNoisyTime)")
+                if (!isServiceRunning) {
+                    try {
+                        val emitter = reactApplicationContext
+                            .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                        emitter?.emit("MediaControlEvent", "noisy_pause")
+                        emitter?.emit("MediaControlEvent", "pause")
+                    } catch (e: Exception) {
+                        // ignore
+                    }
+                }
+            }
+        }
+    }
 
     init {
         MediaService.reactContext = reactContext
+        try {
+            val filter = IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                reactContext.registerReceiver(noisyReceiver, filter, Context.RECEIVER_EXPORTED)
+            } else {
+                reactContext.registerReceiver(noisyReceiver, filter)
+            }
+            noisyReceiverRegistered = true
+        } catch (e: Exception) {
+            Log.w("MediaModule", "Failed to register noisy receiver: ${e.message}")
+        }
     }
 
     // Cached metadata
@@ -311,6 +350,18 @@ class MediaModule(reactContext: ReactApplicationContext) :
         Log.d("MediaModule", "[setSkipAudioFocus] skip=$skip (handled in JS layer)")
     }
 
+    // 同步判断最近 4 秒内是否有耳机断开/拔出事件
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    fun isRecentlyNoisy(): Boolean {
+        return (System.currentTimeMillis() - lastNoisyTime) < 4000L
+    }
+
+    // 重置 Noisy 状态（如用户主动再次点击播放时）
+    @ReactMethod
+    fun resetNoisy() {
+        lastNoisyTime = 0L
+    }
+
     // === High-performance native log append without loading entire file into JS memory ===
     @ReactMethod
     fun appendToFile(filePath: String, content: String, promise: Promise) {
@@ -332,6 +383,18 @@ class MediaModule(reactContext: ReactApplicationContext) :
         } catch (e: Exception) {
             Log.e("MediaModule", "[appendToFile] error: ${e.message}")
             promise.reject("APPEND_ERROR", e.message)
+        }
+    }
+
+    override fun invalidate() {
+        super.invalidate()
+        if (noisyReceiverRegistered) {
+            try {
+                reactApplicationContext.unregisterReceiver(noisyReceiver)
+            } catch (e: Exception) {
+                // ignore
+            }
+            noisyReceiverRegistered = false
         }
     }
 }

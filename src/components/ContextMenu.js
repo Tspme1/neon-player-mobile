@@ -61,23 +61,36 @@ export default function ContextMenu({ visible, onClose, title, actions, x, y }) 
               {title}
             </Text>
           ) : null}
-          {actions.map((action, index) => (
-            <TouchableOpacity
-              key={index}
-              style={styles.actionBtn}
-              onPress={() => {
-                onClose();
-                setTimeout(() => action.onPress(), 100);
-              }}
-            >
-              <Text style={[
-                styles.actionText,
-                { color: action.destructive ? '#e74c3c' : colors.textPrimary }
-              ]}>
-                {action.label}
-              </Text>
-            </TouchableOpacity>
-          ))}
+          {actions.map((action, index) => {
+            const IconComp = action.icon;
+            const iconColor = action.destructive ? '#e74c3c' : colors.textPrimary;
+            return (
+              <TouchableOpacity
+                key={index}
+                style={styles.actionBtn}
+                onPress={() => {
+                  onClose();
+                  setTimeout(() => action.onPress(), 100);
+                }}
+              >
+                {IconComp ? (
+                  <View style={styles.actionIconWrap}>
+                    {React.isValidElement(IconComp) ? (
+                      IconComp
+                    ) : typeof IconComp === 'function' ? (
+                      <IconComp size={16} color={iconColor} strokeWidth={2} />
+                    ) : null}
+                  </View>
+                ) : null}
+                <Text style={[
+                  styles.actionText,
+                  { color: action.destructive ? '#e74c3c' : colors.textPrimary }
+                ]}>
+                  {action.label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
         </View>
       </TouchableOpacity>
     </Modal>
@@ -109,8 +122,16 @@ const styles = StyleSheet.create({
     borderBottomColor: 'rgba(128,128,128,0.2)',
   },
   actionBtn: {
-    paddingVertical: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 13,
     paddingHorizontal: 16,
+  },
+  actionIconWrap: {
+    marginRight: 10,
+    width: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   actionText: {
     fontSize: 15,

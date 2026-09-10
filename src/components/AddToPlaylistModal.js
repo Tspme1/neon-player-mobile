@@ -8,7 +8,7 @@ import {
 import { useTheme } from '../theme/useTheme';
 import { usePlayerStore } from '../store/useStore';
 import { isFavorited, isTrackInPlaylist } from '../core/storage';
-import { CloseIcon } from './icons';
+import { CloseIcon, PlusIcon, CheckIcon } from './icons';
 
 export default function AddToPlaylistModal() {
   const { colors, isDark } = useTheme();
@@ -130,7 +130,8 @@ export default function AddToPlaylistModal() {
                   style={[styles.createBtn, { borderColor: colors.border }]}
                   onPress={() => setCreating(true)}
                 >
-                  <Text style={[styles.createBtnText, { color: colors.accent }]}>➕ 新建歌单</Text>
+                  <PlusIcon width={14} height={14} color={colors.accent} />
+                  <Text style={[styles.createBtnText, { color: colors.accent }]}>新建歌单</Text>
                 </TouchableOpacity>
               )}
 
@@ -150,7 +151,8 @@ export default function AddToPlaylistModal() {
                     </View>
                     {item.isIn ? (
                       <View style={[styles.checkedBadge, { backgroundColor: colors.accent + '22' }]}>
-                        <Text style={[styles.checkedText, { color: colors.accent }]}>已收录 ✔</Text>
+                        <Text style={[styles.checkedText, { color: colors.accent }]}>已收录</Text>
+                        <CheckIcon width={13} height={13} color={colors.accent} style={{ marginLeft: 4 }} />
                       </View>
                     ) : (
                       <Text style={[styles.addText, { color: colors.textMuted }]}>点击加入</Text>
@@ -200,11 +202,14 @@ const styles = StyleSheet.create({
     padding: 6,
   },
   createBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
     paddingVertical: 10,
     borderRadius: 8,
     borderWidth: 1,
     borderStyle: 'dashed',
-    alignItems: 'center',
     marginVertical: 8,
   },
   createBtnText: {
@@ -274,6 +279,8 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   checkedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 6,

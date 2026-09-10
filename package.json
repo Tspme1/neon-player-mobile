@@ -1,6 +1,6 @@
 {
   "name": "neon-player-mobile",
-  "version": "1.00.013",
+  "version": "1.00.014",
   "main": "node_modules/expo/AppEntry.js",
   "scripts": {
     "start": "expo start",

@@ -9,7 +9,7 @@ import { isFavorited, toggleFavorite } from '../core/storage';
 import TrackItem from '../components/TrackItem';
 import EmptyState from '../components/EmptyState';
 import ContextMenu from '../components/ContextMenu';
-import { SettingsIcon } from '../components/icons';
+import { SettingsIcon, FolderPlusIcon, PlayIcon, TrashIcon } from '../components/icons';
 
 export default function QueueScreen() {
   const { colors } = useTheme();
@@ -132,9 +132,9 @@ export default function QueueScreen() {
         onClose={() => setMenuVisible(false)}
         title={menuTitle}
         actions={[
-          { label: '📑 添加到歌单', onPress: () => usePlayerStore.getState().openAddToPlaylist(menuTrack) },
-          { label: '▶ 下一首播放', onPress: () => handlePlayNext(menuIndex) },
-          { label: '🗑 从列表移除', onPress: () => handleRemove(menuIndex), destructive: true },
+          { label: '添加到歌单', icon: FolderPlusIcon, onPress: () => usePlayerStore.getState().openAddToPlaylist(menuTrack) },
+          { label: '下一首播放', icon: PlayIcon, onPress: () => handlePlayNext(menuIndex) },
+          { label: '从列表移除', icon: TrashIcon, onPress: () => handleRemove(menuIndex), destructive: true },
         ]}
       />
     </View>
