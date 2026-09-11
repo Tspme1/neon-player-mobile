@@ -48,6 +48,9 @@ export default function FullPlayer({ visible, onClose, onQueuePress }) {
     }
   }, [visible]);
 
+  // 进度条拖拽瞬时态（拖动期间锁死 UI，避免 status update 导致进度条回弹/抖动）
+  const [slidingSec, setSlidingSec] = useState(null);
+
   // === 歌词行高度动态测量与锁定正中 + 手动拖拽跳转 ===
   const lineLayouts = useRef([]);
   const isManualScrollingRef = useRef(false);
@@ -277,6 +280,7 @@ export default function FullPlayer({ visible, onClose, onQueuePress }) {
   };
 
   const handleSeek = (value) => {
+    setSlidingSec(null);
     seekTo(value * 1000);
   };
 
@@ -618,14 +622,18 @@ export default function FullPlayer({ visible, onClose, onQueuePress }) {
           style={styles.slider}
           minimumValue={0}
           maximumValue={durSec > 0 ? durSec : 1}
-          value={posSec}
+          value={slidingSec !== null ? slidingSec : posSec}
+          onSlidingStart={(val) => setSlidingSec(val)}
+          onValueChange={(val) => setSlidingSec(val)}
           onSlidingComplete={handleSeek}
           minimumTrackTintColor={colors.accent}
           maximumTrackTintColor={colors.border}
           thumbTintColor={colors.accent}
         />
         <View style={styles.timeRow}>
-          <Text style={[styles.time, { color: colors.textMuted }]}>{formatTime(posSec)}</Text>
+          <Text style={[styles.time, { color: colors.textMuted }]}>
+            {formatTime(slidingSec !== null ? slidingSec : posSec)}
+          </Text>
           <Text style={[styles.time, { color: colors.textMuted }]}>{formatTime(durSec)}</Text>
         </View>
       </View>

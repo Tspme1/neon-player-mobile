@@ -2,7 +2,7 @@
 // 提供统一搜索、URL获取、音源导入管理
 // LX 音源通过 WebView 沙箱（引用 lx-webview-manager.js + lx-webview-sandbox.js + lx-runner.js + anti-debug-patch.js）
 
-import { NativeModules } from 'react-native';
+import { NativeModules, AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as DocumentPicker from 'expo-document-picker';
 import crypto from 'crypto-js';
@@ -56,7 +56,11 @@ async function nativeLxMusicUrl(songId, platform = 'netease', quality = 'standar
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Referer': 'https://music.163.com/',
       });
-      const responseText = await NativeModules.MediaModule.nativeHttpGet(apiUrl, headers);
+      const responseText = await withTimeout(
+        NativeModules.MediaModule.nativeHttpGet(apiUrl, headers),
+        2500,
+        `nativeLx-api-${i + 1}`
+      );
       _log(`API ${i + 1} response: ${responseText ? responseText.substring(0, 120) : 'empty'}`);
       if (!responseText) continue;
       
@@ -1570,25 +1574,35 @@ async function _musicSongUrlImpl(playSource, songId, platform, song, quality = '
     if (playSource.startsWith('lx:')) {
       const sourceId = playSource.slice(3);
       try {
-        // 第一步: 优先 nativeLxMusicUrl（所有平台）
-        _log('LX: nativeLxMusicUrl start (primary)');
-        let url = await nativeLxMusicUrl(songId, platform, quality);
-        _log(`LX: nativeLxMusicUrl done: ${url ? 'has url' : 'null'}`);
-        if (url && typeof url === 'string' && url.startsWith('http')) {
-          return { url, isLocal: false };
+        let url = null;
+        const isBg = AppState.currentState === 'background';
+
+        // 第一步（前台优先）：若沙箱已就绪，优先直接走 WebView 沙箱（由用户导入的音源脚本执行，速度快且稳定，支持VIP与全平台）
+        if (!isBg && isSandboxReady()) {
+          _log('LX: sandbox ready, getLxMusicUrlWebView start (priority 1)');
+          try {
+            url = await withTimeout(
+              getLxMusicUrlWebView(sourceId, songId, '128k', platform, song),
+              3500,
+              'WebViewSandbox'
+            );
+            _log(`LX: getLxMusicUrlWebView done: ${url ? 'has url' : 'null'}`);
+          } catch (we) {
+            _log(`LX: getLxMusicUrlWebView failed/timeout: ${we.message}`);
+          }
         }
 
-        // 第二步: WebView 沙箱（传入平台与歌曲元数据，支持五平台与规范ID）
-        _log('LX: fallback to WebView');
-        url = null;
-        if (isSandboxReady()) {
-          _log('LX: sandbox ready, getLxMusicUrlWebView start');
-          url = await getLxMusicUrlWebView(sourceId, songId, '128k', platform, song);
-          _log(`LX: getLxMusicUrlWebView done: ${url ? 'has url' : 'null'}`);
-        } else {
-          _log('LX: sandbox not ready, waitForSandboxReady(5000)');
-          const waited = await waitForSandboxReady(5000);
-          _log(`LX: waitForSandboxReady result: ${waited}`);
+        // 第二步：若沙箱未返回可用 URL（后台运行、沙箱出错或超时），快速尝试原生层 HTTP 请求 (nativeLxMusicUrl)
+        if (!url || typeof url !== 'string' || !url.startsWith('http')) {
+          _log('LX: try nativeLxMusicUrl (fallback or background)');
+          url = await nativeLxMusicUrl(songId, platform, quality);
+          _log(`LX: nativeLxMusicUrl done: ${url ? 'has url' : 'null'}`);
+        }
+
+        // 第三步：若原生层也未成功，且之前没试过沙箱（例如应用刚启动沙箱在初始化），等待沙箱启动完成兜底
+        if ((!url || typeof url !== 'string' || !url.startsWith('http')) && !isBg && !isSandboxReady()) {
+          _log('LX: waiting for sandbox ready (fallback)');
+          const waited = await waitForSandboxReady(3000);
           if (waited) {
             url = await getLxMusicUrlWebView(sourceId, songId, '128k', platform, song);
             _log(`LX: getLxMusicUrlWebView done: ${url ? 'has url' : 'null'}`);
@@ -1785,7 +1799,7 @@ async function searchFallbackWithLxSource(song, preferredLxSourceId = '', qualit
             try {
               const res = await withTimeout(
                 _musicSongUrlImpl(cSource.id, match.id, plat, match, quality),
-                10000,
+                4500,
                 `fallback-${plat}-${cSource.name}`
               );
               if (res && res.url && typeof res.url === 'string' && res.url.startsWith('http')) {
@@ -1850,8 +1864,8 @@ async function resolvePlayableUrlCascade(song, currentPlaySource = 'official', q
     if (songId) {
       try {
         const isLx = currentPlaySource.startsWith('lx:');
-        // 自定义音源给 15 秒充足超时（沙箱跨进程+外部脚本请求耗时较长），官方源给 5 秒
-        const timeoutMs = isLx ? 15000 : 5000;
+        // 自定义音源超时缩短至 5000ms（沙箱秒级出结果，原生层有快超时，杜绝长时间冻结），官方源给 4000ms
+        const timeoutMs = isLx ? 5000 : 4000;
         logger.info('SourceManager', `Cascade Tier 1: Trying primary source [${currentPlaySource}] with timeout ${timeoutMs}ms`);
         const primaryRes = await withTimeout(
           _musicSongUrlImpl(currentPlaySource, songId, platform, song, quality),
@@ -1888,7 +1902,7 @@ async function resolvePlayableUrlCascade(song, currentPlaySource = 'official', q
             logger.info('SourceManager', `Cascade Tier 2: Trying [${entry.name}] (${entry.id})`);
             const customRes = await withTimeout(
               _musicSongUrlImpl('lx:' + entry.id, songId, platform, song, quality),
-              10000,
+              4500,
               `Tier2-${entry.name}`
             );
             if (customRes && customRes.url && customRes.url.startsWith('http')) {
