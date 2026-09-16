@@ -22,6 +22,12 @@ import logger from '../core/logger';
 // Store 定义
 // =====================================================================
 
+// 独立的高频进度 Store，供进度条专用订阅，防止 position 变动冲刷全局 Store
+export const usePlaybackProgress = create(() => ({
+  position: 0,
+  duration: 0,
+}));
+
 export const usePlayerStore = create((set, get) => ({
   // === 播放状态（从 player-engine 镜像） ===
   isPlaying: false,
@@ -69,6 +75,7 @@ export const usePlayerStore = create((set, get) => ({
 
   // === 播放模式 ===
   allowMixWithOthers: false,  // 允许与其他应用同时播放
+  enableCrossPlatformFailover: true, // 跨源故障转移（原音源失败时自动在其他平台寻找可用音源播放）
 
   // === 发现页 ===
   toplistData: [],
@@ -295,6 +302,17 @@ export const usePlayerStore = create((set, get) => ({
     }
   },
 
+  setEnableCrossPlatformFailover: async (value) => {
+    set({ enableCrossPlatformFailover: value });
+    try {
+      const settings = await loadSettings();
+      settings.enableCrossPlatformFailover = value;
+      await saveSettings(settings);
+    } catch (e) {
+      console.error('[Store] Failed to persist enableCrossPlatformFailover:', e);
+    }
+  },
+
   setToplistData(data) {
     set({ toplistData: data });
   },
@@ -407,12 +425,17 @@ export function initStore() {
 
   // playback:state-change → 更新播放状态
   on(EVENTS.PLAYBACK_STATE_CHANGE, (data) => {
-    const update = {};
-    if (data.isPlaying !== undefined) update.isPlaying = data.isPlaying;
-    if (data.position !== undefined) update.position = data.position;
-    if (data.duration !== undefined) update.duration = data.duration;
-    if (Object.keys(update).length > 0) {
-      usePlayerStore.setState(update);
+    // 1. 只有播放/暂停状态改变时才更新全局 usePlayerStore，切断全应用 8 个页面的 100ms 重渲染风暴
+    if (data.isPlaying !== undefined && data.isPlaying !== usePlayerStore.getState().isPlaying) {
+      usePlayerStore.setState({ isPlaying: data.isPlaying });
+    }
+
+    // 2. 100ms 高频更新仅写入专用轻量 Hook usePlaybackProgress
+    const progUpdate = {};
+    if (data.position !== undefined) progUpdate.position = data.position;
+    if (data.duration !== undefined) progUpdate.duration = data.duration;
+    if (Object.keys(progUpdate).length > 0) {
+      usePlaybackProgress.setState(progUpdate);
     }
   });
 
@@ -590,6 +613,7 @@ export async function initApp() {
     musicQuality: settings.musicQuality || 'standard',
     playMode: settings.playMode || 'sequence',
     allowMixWithOthers: settings.allowMixWithOthers || false,
+    enableCrossPlatformFailover: settings.enableCrossPlatformFailover !== false,
   });
   PlayerEngine.setCurrentSource(src);
   PlayerEngine.setPlayMode(settings.playMode || 'sequence');

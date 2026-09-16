@@ -11,18 +11,32 @@
 param(
     [string]$CommitMessage,
     [string]$ReleaseNotes,
+    [string]$ProjectRoot,
     [switch]$SkipBuild = $true
 )
 
 $ErrorActionPreference = "Stop"
 
-# 1. 确定项目根目录
-$ProjectRoot = "D:\anti_work\neon"
+# 1. 确定项目根目录（向上遍历寻找包含 package.json 的根目录）
+if (-not $ProjectRoot) {
+    $dir = $PSScriptRoot
+    while ($dir -and -not (Test-Path (Join-Path $dir "package.json"))) {
+        $parent = Split-Path $dir -Parent
+        if ($parent -eq $dir) { break }
+        $dir = $parent
+    }
+    if ($dir -and (Test-Path (Join-Path $dir "package.json"))) {
+        $ProjectRoot = $dir
+    } else {
+        $ProjectRoot = (Get-Item "$PSScriptRoot\..\..\..\..").FullName
+    }
+}
 Set-Location $ProjectRoot
 
 Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host " Neon Player Mobile Release & Backup " -ForegroundColor Cyan
 Write-Host "=========================================" -ForegroundColor Cyan
+Write-Host "Project Root: $ProjectRoot" -ForegroundColor Gray
 
 # 2. 读取版本号
 $packageJsonPath = Join-Path $ProjectRoot "package.json"
@@ -32,6 +46,40 @@ if (-not (Test-Path $packageJsonPath)) {
 $pkg = Get-Content $packageJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $version = $pkg.version
 Write-Host "[1/6] Current version: $version" -ForegroundColor Green
+
+# 2.5 维护并追加脱敏版本变更记录 (CHANGELOG.md)
+$changelogPath = Join-Path $ProjectRoot "readme\CHANGELOG.md"
+if (Test-Path $changelogPath) {
+    $currentContent = Get-Content $changelogPath -Raw -Encoding UTF8
+    $versionHeader = "## [$version]"
+    if (-not $currentContent.Contains($versionHeader)) {
+        Write-Host "Appending release notes to CHANGELOG.md..." -ForegroundColor Yellow
+        $sanitizedNotes = $ReleaseNotes
+        if (-not $sanitizedNotes) {
+            $sanitizedNotes = "- 版本功能优化与已知问题修复。"
+        }
+        # 脱敏规则：过滤私有磁盘绝对路径、密钥Token、设备号
+        $sanitizedNotes = $sanitizedNotes -replace '[a-zA-Z]:\\[^\s\r\n"]+', '<LOCAL_PATH>'
+        $sanitizedNotes = $sanitizedNotes -replace '(?i)(token|key|secret|password)\s*[:=]\s*[a-zA-Z0-9_.-]+', '$1: <REDACTED>'
+        
+        $today = (Get-Date).ToString("yyyy-MM-dd")
+        $newEntry = "`n## [$version] - $today`n`n$sanitizedNotes`n"
+        
+        $separator = "---"
+        if ($currentContent.Contains($separator)) {
+            $pos = $currentContent.IndexOf($separator)
+            $before = $currentContent.Substring(0, $pos + $separator.Length)
+            $after = $currentContent.Substring($pos + $separator.Length)
+            $updatedContent = $before + "`n" + $newEntry + $after
+        } else {
+            $updatedContent = $currentContent + "`n" + $newEntry
+        }
+        [System.IO.File]::WriteAllText($changelogPath, $updatedContent, [System.Text.Encoding]::UTF8)
+        Write-Host "CHANGELOG.md updated successfully." -ForegroundColor Green
+    } else {
+        Write-Host "CHANGELOG.md already contains entry for $version." -ForegroundColor Gray
+    }
+}
 
 # 3. 检查 APK 文件
 $apkSourcePath = Join-Path $ProjectRoot "android\app\build\outputs\apk\release\app-release.apk"

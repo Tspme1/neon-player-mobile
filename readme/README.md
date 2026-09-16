@@ -199,6 +199,10 @@ cd android
 | `package.json` | `version` |
 | `android/app/build.gradle` | `versionCode`（+1）+ `versionName` |
 
+## 📝 更新记录
+
+完整版本变更历史与脱敏技术细节请参阅 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 📄 许可证
 
 本项目采用 [MIT License](LICENSE) 开源。

@@ -12,7 +12,7 @@ import {
   VolumeOnIcon, VolumeMuteIcon, ListIcon, MoreIcon, DownloadIcon,
   ClockIcon, ShareIcon, FolderIcon, MusicIcon, CheckIcon
 } from './icons';
-import { usePlayerStore } from '../store/useStore';
+import { usePlayerStore, usePlaybackProgress } from '../store/useStore';
 import { isFavorited as checkFavorited, toggleFavorite as toggleFav, loadSettings } from '../core/storage';
 import { formatTime } from '../utils/format';
 import { musicSongUrl } from '../core/source-manager';
@@ -20,9 +20,13 @@ import { getCurrentVersionName } from '../core/updater';
 
 const { height: SCREEN_HEIGHT, width: SCREEN_WIDTH } = Dimensions.get('window');
 const COVER_SIZE = Math.min(SCREEN_WIDTH * 0.5, SCREEN_HEIGHT * 0.28);
+const EMPTY_PROGRESS = { position: 0, duration: 0 };
 
 export default function FullPlayer({ visible, onClose, onQueuePress }) {
   const { colors } = useTheme();
+
+  // 仅在全屏播放器打开可见时才订阅高频播放进度；隐藏时完全静默（零重渲染）
+  const { position, duration } = usePlaybackProgress(s => visible ? s : EMPTY_PROGRESS);
 
   const store = usePlayerStore();
   const lyricsScrollRef = useRef(null);
@@ -30,7 +34,7 @@ export default function FullPlayer({ visible, onClose, onQueuePress }) {
   const {
     playlist, currentIndex, isPlaying, playMode, isRoaming,
     roamIndex, roamPlaylist, favorites, lyricsData, currentLyricIndex,
-    position, duration, volume, isMuted, currentCoverUrl
+    volume, isMuted, currentCoverUrl
   } = store;
 
   const {

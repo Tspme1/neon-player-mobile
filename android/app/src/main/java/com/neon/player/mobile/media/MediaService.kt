@@ -219,6 +219,13 @@ class MediaService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_UPDATE -> {
+                val oldTitle = currentTitle
+                val oldArtist = currentArtist
+                val oldArtwork = currentArtworkUrl
+                val oldDuration = currentDuration
+                val oldIsPlaying = currentIsPlaying
+                val oldIsFavorited = currentIsFavorited
+
                 intent.getStringExtra(EXTRA_TITLE)?.let { currentTitle = it }
                 intent.getStringExtra(EXTRA_ARTIST)?.let { currentArtist = it }
                 val artwork = intent.getStringExtra(EXTRA_ARTWORK)
@@ -235,8 +242,19 @@ class MediaService : Service() {
                 intent.getBooleanExtra(EXTRA_IS_PLAYING, currentIsPlaying).let { currentIsPlaying = it }
                 intent.getDoubleExtra(EXTRA_POSITION, currentPosition.toDouble()).let { currentPosition = it.toLong() }
                 intent.getBooleanExtra(EXTRA_IS_FAVORITED, currentIsFavorited).let { currentIsFavorited = it }
+
+                val metadataChanged = currentTitle != oldTitle || currentArtist != oldArtist || currentArtworkUrl != oldArtwork || currentDuration != oldDuration
+                val playStateChanged = currentIsPlaying != oldIsPlaying
+                val favChanged = currentIsFavorited != oldIsFavorited
+
+                // 更新 MediaSession（用于系统锁屏和通知栏原生基于 PlaybackState 自动插值推算进度条）
                 updateMediaSession()
-                updateNotification()
+
+                // 核心性能优化：仅在曲目元数据、播放/暂停状态或喜欢状态改变时，才通知系统重建通知栏 UI (nm.notify)
+                // 严禁在每 100ms 进度更新时调用 updateNotification()，彻底终结 Binder 跨进程 IPC 轰炸与界面冻结
+                if (metadataChanged || playStateChanged || favChanged) {
+                    updateNotification()
+                }
             }
         }
         return START_STICKY

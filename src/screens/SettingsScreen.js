@@ -43,7 +43,16 @@ const CACHE_LIMITS = [
 export default function SettingsScreen({ visible, onClose }) {
   const { colors } = useTheme();
 
-  const { setToast, themeMode, setThemeMode, allowMixWithOthers, setAllowMixWithOthers, favorites } = usePlayerStore();
+  const {
+    setToast,
+    themeMode,
+    setThemeMode,
+    allowMixWithOthers,
+    setAllowMixWithOthers,
+    enableCrossPlatformFailover,
+    setEnableCrossPlatformFailover,
+    favorites
+  } = usePlayerStore();
 
   const [cacheSize, setCacheSize] = useState('0 B (0 个文件)');
   const [logSize, setLogSize] = useState('0 B');
@@ -411,31 +420,37 @@ export default function SettingsScreen({ visible, onClose }) {
   };
 
   const handleCheckUpdate = async () => {
+    if (checkingUpdate) return;
     setCheckingUpdate(true);
-    // 清除之前跳过的版本，允许重新检查
-    await clearSkippedVersion();
-    const info = await checkForUpdate();
-    setCheckingUpdate(false);
+    try {
+      // 清除之前跳过的版本，允许重新检查
+      await clearSkippedVersion();
+      const info = await checkForUpdate();
 
-    if (!info) {
-      setToast('检查更新失败，请稍后重试');
-      return;
+      if (!info) {
+        setToast('检查更新失败，请稍后重试');
+        return;
+      }
+      if (!info.hasUpdate) {
+        setToast('当前已是最新版本');
+        return;
+      }
+      if (!(await shouldShowUpdateDialog(info))) {
+        setToast('当前已是最新版本');
+        return;
+      }
+      // 有更新 — 通过 store 触发弹窗
+      usePlayerStore.setState({
+        showToast: true,
+        toastMessage: `发现新版本 v${info.versionName}，请在更新弹窗中确认`,
+      });
+      // 通知 App 层显示弹窗
+      usePlayerStore.setState({ pendingUpdateInfo: info });
+    } catch (e) {
+      setToast('检查更新出错，请重试');
+    } finally {
+      setCheckingUpdate(false);
     }
-    if (!info.hasUpdate) {
-      setToast('当前已是最新版本');
-      return;
-    }
-    if (!(await shouldShowUpdateDialog(info))) {
-      setToast('当前已是最新版本');
-      return;
-    }
-    // 有更新 — 通过 store 触发弹窗
-    usePlayerStore.setState({
-      showToast: true,
-      toastMessage: `发现新版本 v${info.versionName}，请在更新弹窗中确认`,
-    });
-    // 通知 App 层显示弹窗
-    usePlayerStore.setState({ pendingUpdateInfo: info });
   };
 
   return (
@@ -532,6 +547,25 @@ export default function SettingsScreen({ visible, onClose }) {
                 >
                   <Text style={{ color: allowMixWithOthers ? '#fff' : colors.textMuted, fontSize: 13, fontWeight: '600' }}>
                     {allowMixWithOthers ? '开' : '关'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+              <View style={[styles.row, { borderColor: colors.border }]}>
+                <View style={{ flex: 1, paddingRight: 10 }}>
+                  <Text style={[styles.rowLabel, { color: colors.textSecondary }]}>跨源故障转移</Text>
+                  <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 2 }}>原音源解析失败时，自动匹配其他平台可用音源播放</Text>
+                </View>
+                <TouchableOpacity
+                  style={[
+                    styles.toggleBtn,
+                    enableCrossPlatformFailover
+                      ? { backgroundColor: colors.accent }
+                      : { backgroundColor: colors.bgTertiary, borderWidth: 1, borderColor: colors.border }
+                  ]}
+                  onPress={() => setEnableCrossPlatformFailover(!enableCrossPlatformFailover)}
+                >
+                  <Text style={{ color: enableCrossPlatformFailover ? '#fff' : colors.textMuted, fontSize: 13, fontWeight: '600' }}>
+                    {enableCrossPlatformFailover ? '开' : '关'}
                   </Text>
                 </TouchableOpacity>
               </View>

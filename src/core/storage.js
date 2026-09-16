@@ -141,9 +141,10 @@ export async function loadSettings() {
     if (!settings.musicQuality) settings.musicQuality = 'standard';
     if (!settings.playMode) settings.playMode = 'sequence';
     if (settings.allowMixWithOthers === undefined) settings.allowMixWithOthers = false;
+    if (settings.enableCrossPlatformFailover === undefined) settings.enableCrossPlatformFailover = true;
     return settings;
   } catch {
-    return { currentSource: 'netease', searchSource: 'netease', playSource: 'official', themeMode: 'auto', musicQuality: 'standard', playMode: 'sequence', allowMixWithOthers: false };
+    return { currentSource: 'netease', searchSource: 'netease', playSource: 'official', themeMode: 'auto', musicQuality: 'standard', playMode: 'sequence', allowMixWithOthers: false, enableCrossPlatformFailover: true };
   }
 }
 

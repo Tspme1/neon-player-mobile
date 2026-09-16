@@ -33,7 +33,7 @@ let _favorites = [];
 // 是否有更新待推送
 let pendingFlush = false;
 let flushTimer = null;
-const FLUSH_DELAY = 50;
+const FLUSH_DELAY = 1000;
 
 // =====================================================================
 // 核心同步：把完整状态一次性推给原生层
@@ -74,14 +74,29 @@ function setMetadata(title, artist, artworkUrl, durationSec) {
   notifArtworkUrl = artworkUrl || '';
   notifDuration = durationSec || 0;
   // 曲目元数据变化必须立即同步，后台 setTimeout 不可靠
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
   flushToNative();
 }
 
 function setPlaybackState(isPlaying, positionSec) {
+  const isPlayingChanged = notifIsPlaying !== !!isPlaying;
+  const isLargeSeek = Math.abs((positionSec || 0) - notifPosition) > 2;
   notifIsPlaying = !!isPlaying;
   notifPosition = positionSec || 0;
-  // 播放状态变化必须立即同步
-  flushToNative();
+
+  // 播放/暂停状态切换或大幅度 seek 必须立即同步原生；常规微小播放进度走 1 秒防抖
+  if (isPlayingChanged || isLargeSeek) {
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
+    flushToNative();
+  } else {
+    scheduleFlush();
+  }
 }
 
 function setFavoriteState(favorited) {

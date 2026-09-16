@@ -256,6 +256,7 @@ export async function getLxMusicUrlWebView(sourceId, songId, quality = '128k', p
   const rawStr = String(songId || (song && (song.songId || song.id)) || '');
   const cleanHash = (rawStr.includes('|') ? rawStr.split('|')[0] : rawStr).toUpperCase();
   const cleanRid = rawStr.replace('MUSIC_', '');
+  const rawAlbumId = (song && (song.albumId || song.AlbumID)) || (rawStr.includes('|') ? rawStr.split('|')[1] : '') || '';
   const songName = (song && (song.name || song.title)) || '';
   const songArtist = (song && (song.artist || (song.artists && song.artists.map(a => a.name).join(', ')))) || '';
 
@@ -264,11 +265,12 @@ export async function getLxMusicUrlWebView(sourceId, songId, quality = '128k', p
     source: lxSource,
     meta: {
       songId: lxSource === 'kw' ? cleanRid : (lxSource === 'kg' ? cleanHash : rawStr),
-      albumId: (song && song.albumId) || '',
+      albumId: rawAlbumId,
       albumName: (song && (song.album || (song.al && song.al.name))) || '',
     },
     songmid: lxSource === 'kw' ? cleanRid : (lxSource === 'kg' ? cleanHash : rawStr),
     hash: lxSource === 'kg' ? cleanHash : rawStr,
+    albumId: rawAlbumId,
     name: songName,
     singer: songArtist,
   };

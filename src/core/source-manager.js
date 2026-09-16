@@ -628,6 +628,7 @@ async function kugouSearch(keyword, page = 0, limit = 30) {
         name, artist, album,
         duration: parseInt(s.Duration || 0),
         fee: (s.Privilege && s.Privilege > 0) ? 1 : 0, _src: 'kugou',
+        albumId: String(s.AlbumID || '0'),
         // 封面：搜索接口自带 Image 字段（形如 http://imge.kugou.com/stdmusic/{size}/xxx.jpg）
         // {size} 替换为 240/400 即可缩放（实测 https 可用，与 http 同源同证书）
         picUrl: s.Image ? s.Image.replace('{size}', '400').replace(/^http:/, 'https:') : '',
@@ -1577,9 +1578,16 @@ async function _musicSongUrlImpl(playSource, songId, platform, song, quality = '
         let url = null;
         const isBg = AppState.currentState === 'background';
 
-        // 第一步（前台优先）：若沙箱已就绪，优先直接走 WebView 沙箱（由用户导入的音源脚本执行，速度快且稳定，支持VIP与全平台）
-        if (!isBg && isSandboxReady()) {
-          _log('LX: sandbox ready, getLxMusicUrlWebView start (priority 1)');
+        // 策略1：如果是网易云且处于后台，优先直接走 nativeLxMusicUrl（1秒极速出链，免除后台 WebView 潜在节流）
+        if (isBg && platform === 'netease') {
+          _log('LX: background + netease, try nativeLxMusicUrl first');
+          url = await nativeLxMusicUrl(songId, platform, quality);
+          _log(`LX: nativeLxMusicUrl done: ${url ? 'has url' : 'null'}`);
+        }
+
+        // 策略2：若尚未获得 URL，且沙箱已就绪，调用 WebView 沙箱解析（全平台通用，无论前台后台均支持，超时 3500ms）
+        if ((!url || typeof url !== 'string' || !url.startsWith('http')) && isSandboxReady()) {
+          _log('LX: sandbox ready, getLxMusicUrlWebView start');
           try {
             url = await withTimeout(
               getLxMusicUrlWebView(sourceId, songId, '128k', platform, song),
@@ -1592,15 +1600,15 @@ async function _musicSongUrlImpl(playSource, songId, platform, song, quality = '
           }
         }
 
-        // 第二步：若沙箱未返回可用 URL（后台运行、沙箱出错或超时），快速尝试原生层 HTTP 请求 (nativeLxMusicUrl)
-        if (!url || typeof url !== 'string' || !url.startsWith('http')) {
-          _log('LX: try nativeLxMusicUrl (fallback or background)');
+        // 策略3：若仍未获得 URL，且尚未尝试原生层（如前台网易云沙箱超时），快速尝试原生层 HTTP (nativeLxMusicUrl)
+        if ((!url || typeof url !== 'string' || !url.startsWith('http')) && (!isBg || platform !== 'netease')) {
+          _log('LX: try nativeLxMusicUrl (fallback)');
           url = await nativeLxMusicUrl(songId, platform, quality);
           _log(`LX: nativeLxMusicUrl done: ${url ? 'has url' : 'null'}`);
         }
 
-        // 第三步：若原生层也未成功，且之前没试过沙箱（例如应用刚启动沙箱在初始化），等待沙箱启动完成兜底
-        if ((!url || typeof url !== 'string' || !url.startsWith('http')) && !isBg && !isSandboxReady()) {
+        // 策略4：若仍未获得 URL，且沙箱尚未就绪（如应用刚启动），等待沙箱启动完成兜底
+        if ((!url || typeof url !== 'string' || !url.startsWith('http')) && !isSandboxReady()) {
           _log('LX: waiting for sandbox ready (fallback)');
           const waited = await waitForSandboxReady(3000);
           if (waited) {
@@ -1767,11 +1775,34 @@ async function searchFallbackWithLxSource(song, preferredLxSourceId = '', qualit
     return null;
   }
 
+  const DIRTY_KEYWORDS = [
+    '伴奏', '伴奏版', '伴奏带', '伴唱', '消音',
+    'instrumental', 'inst', 'offvocal', 'off vocal', 'karaoke',
+    'tvversion', 'tvsize', 'tv version', 'tv size',
+    '片段', '铃声', 'remix', 'dj版', '加速版', '降调版', '升调版', '现场版'
+  ];
+
   const isStrictMatch = (s) => {
     if (!s || !s.name) return false;
-    const sNameClean = (s.name || '').replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '').toLowerCase();
+    const sRawName = (s.name || '').toLowerCase();
+    const sNameClean = sRawName.replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '');
     const nameMatches = sNameClean === cleanTargetName || sNameClean.includes(cleanTargetName) || cleanTargetName.includes(sNameClean);
     if (!nameMatches) return false;
+
+    // 负向特征过滤黑名单：原曲名若不包含该特征，而搜索候选曲目包含，则一票否决！
+    for (const kw of DIRTY_KEYWORDS) {
+      if (!cleanTargetName.includes(kw) && (sNameClean.includes(kw) || sRawName.includes(kw))) {
+        logger.info('SourceManager', `searchFallbackWithLxSource: rejected dirty match "${s.name}" (matched negative kw: "${kw}")`);
+        return false;
+      }
+    }
+
+    // 时长对比过滤（如果双方都有合法时长，且差距超过 25 秒，直接否决避免铃声/节选版）
+    if (song.duration && s.duration && Math.abs(song.duration - s.duration) > 25) {
+      logger.info('SourceManager', `searchFallbackWithLxSource: rejected duration mismatch "${s.name}" (target: ${song.duration}s, candidate: ${s.duration}s)`);
+      return false;
+    }
+
     if (cleanArtist) {
       const sArtistClean = (s.artist || '').replace(/[\s'"`~()（）\-_/\\\[\]!！]/g, '').toLowerCase();
       return sArtistClean.includes(cleanArtist) || cleanArtist.includes(sArtistClean);
@@ -1864,8 +1895,8 @@ async function resolvePlayableUrlCascade(song, currentPlaySource = 'official', q
     if (songId) {
       try {
         const isLx = currentPlaySource.startsWith('lx:');
-        // 自定义音源超时缩短至 5000ms（沙箱秒级出结果，原生层有快超时，杜绝长时间冻结），官方源给 4000ms
-        const timeoutMs = isLx ? 5000 : 4000;
+        // 自定义音源外层超时设为 7500ms（给予沙箱 3500ms + 原生备用 2500ms 充足容错，绝不提前误掐断），官方源给 4000ms
+        const timeoutMs = isLx ? 7500 : 4000;
         logger.info('SourceManager', `Cascade Tier 1: Trying primary source [${currentPlaySource}] with timeout ${timeoutMs}ms`);
         const primaryRes = await withTimeout(
           _musicSongUrlImpl(currentPlaySource, songId, platform, song, quality),
@@ -1928,15 +1959,27 @@ async function resolvePlayableUrlCascade(song, currentPlaySource = 'official', q
     // 【第 3 梯队】：跨搜索来源切换（使用自定义音源进行同名严格解析）
     // 杜绝官方跨平台偷换，只在其他平台检索后由用户导入的音源解析
     // ==========================================
+    let allowCrossFailover = true;
     try {
-      logger.info('SourceManager', `Cascade Tier 3: Trying cross-search-platform with LX source for "${title}" - "${artist}"`);
-      const crossLxRes = await searchFallbackWithLxSource(song, currentPlaySource, quality);
-      if (crossLxRes && crossLxRes.url && crossLxRes.url.startsWith('http')) {
-        logger.info('SourceManager', `Cascade Tier 3: Success with ${crossLxRes.sourceName}`);
-        return crossLxRes;
+      const { usePlayerStore } = await import('../store/useStore');
+      allowCrossFailover = usePlayerStore.getState().enableCrossPlatformFailover !== false;
+    } catch {
+      allowCrossFailover = true;
+    }
+
+    if (allowCrossFailover) {
+      try {
+        logger.info('SourceManager', `Cascade Tier 3: Trying cross-search-platform with LX source for "${title}" - "${artist}"`);
+        const crossLxRes = await searchFallbackWithLxSource(song, currentPlaySource, quality);
+        if (crossLxRes && crossLxRes.url && crossLxRes.url.startsWith('http')) {
+          logger.info('SourceManager', `Cascade Tier 3: Success with ${crossLxRes.sourceName}`);
+          return crossLxRes;
+        }
+      } catch (e) {
+        logger.warn('SourceManager', `Cascade Tier 3 error: ${e.message}`);
       }
-    } catch (e) {
-      logger.warn('SourceManager', `Cascade Tier 3 error: ${e.message}`);
+    } else {
+      logger.info('SourceManager', 'Cascade Tier 3 skipped: Cross-platform failover is disabled by user setting');
     }
 
     // ==========================================

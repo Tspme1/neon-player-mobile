@@ -647,7 +647,11 @@ export async function playOnlineSong(song, queueIndex = -1) {
     emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position: 0, duration: 0 });
     return;
   }
-  setCachedUrl(cacheKey, songUrlData);
+  // 关键防毒：仅当来自原选定音源（未发生跨平台偷换/降级）时才写入长期 URL 缓存
+  // 避免一次偶发降级将伴奏/改版等错误曲目固化在缓存中长达 20 分钟
+  if (!songUrlData.switched) {
+    setCachedUrl(cacheKey, songUrlData);
+  }
 
   if (sessionId !== currentPlaySessionId) return;
 

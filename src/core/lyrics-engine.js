@@ -30,6 +30,15 @@ const lyricsCache = new Map(); // key -> parsed lyrics array (max 200 items)
 // 辅助方法
 // =====================================================================
 
+function withTimeout(promise, ms, label = 'Operation') {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timeout (${ms}ms)`)), ms)
+    ),
+  ]);
+}
+
 /**
  * 生成歌曲唯一标识缓存 key
  */
@@ -129,14 +138,17 @@ export async function fetchLyrics(trackOrSongId) {
       const platform = track._platform || track._src || 'netease';
       const songId = track.songId || track.id || track.songmid || track.hash;
       logger.info('LyricsEngine', 'fetchLyrics online', { platform, songId });
-
-      // 1. 优先尝试 LX 自定义音源（如果已配置）
+      // 1. 优先尝试 LX 自定义音源（如果已配置，设 2500ms 短超时保护）
       try {
         const settings = await loadSettings();
         const playSource = settings.playSource || 'official';
         if (playSource.startsWith('lx:')) {
           const lxSourceId = playSource.replace('lx:', '');
-          const lxResult = await getLxLyricWebView(lxSourceId, track, platform);
+          const lxResult = await withTimeout(
+            getLxLyricWebView(lxSourceId, track, platform),
+            2500,
+            'LX lyric'
+          );
           if (lxResult && lxResult.lrc) {
             const testParsed = parseLyrics(lxResult.lrc, lxResult.tlyric);
             if (testParsed && testParsed.length > 0) {
