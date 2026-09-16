@@ -98,6 +98,11 @@ if (-not $SkipBuild -or -not (Test-Path $apkSourcePath)) {
 
 # 4. Git 检查与提交
 Write-Host "[3/6] Git staging and committing..." -ForegroundColor Yellow
+$gitUser = git config user.name
+if (-not $gitUser) {
+    git config user.name "Tspme1"
+    git config user.email "Tspme1@users.noreply.github.com"
+}
 git add .
 $status = git status --porcelain
 if ($status) {
@@ -116,13 +121,14 @@ if (-not $existingTag) {
     Write-Host "Creating Git Tag: $version" -ForegroundColor Green
     git tag -a $version -m "Neon Player Mobile v$version"
 } else {
-    Write-Host "Git Tag $version already exists." -ForegroundColor Gray
+    Write-Host "Updating Git Tag: $version" -ForegroundColor Green
+    git tag -f -a $version -m "Neon Player Mobile v$version"
 }
 
 # 推送到远程仓库
 Write-Host "Pushing to GitHub (origin main and tags)..." -ForegroundColor Yellow
 git push origin main
-git push origin $version
+git push -f origin $version
 
 # 5. GitHub Release 发布
 Write-Host "[4/6] Creating GitHub Release via REST API..." -ForegroundColor Yellow
