@@ -120,7 +120,10 @@ export async function savePlaylist(playlist) {
 // Settings 设置
 // =====================================================================
 
+let memoryCachedSettings = null;
+
 export async function loadSettings() {
+  if (memoryCachedSettings) return { ...memoryCachedSettings };
   try {
     const json = await AsyncStorage.getItem(KEYS.SETTINGS);
     const settings = json ? JSON.parse(json) : {};
@@ -142,13 +145,15 @@ export async function loadSettings() {
     if (!settings.playMode) settings.playMode = 'sequence';
     if (settings.allowMixWithOthers === undefined) settings.allowMixWithOthers = false;
     if (settings.enableCrossPlatformFailover === undefined) settings.enableCrossPlatformFailover = true;
-    return settings;
+    memoryCachedSettings = settings;
+    return { ...settings };
   } catch {
     return { currentSource: 'netease', searchSource: 'netease', playSource: 'official', themeMode: 'auto', musicQuality: 'standard', playMode: 'sequence', allowMixWithOthers: false, enableCrossPlatformFailover: true };
   }
 }
 
 export async function saveSettings(settings) {
+  memoryCachedSettings = { ...settings };
   try {
     await AsyncStorage.setItem(KEYS.SETTINGS, JSON.stringify(settings));
   } catch (e) {

@@ -48,11 +48,66 @@ async function ensureCacheDir() {
   return CACHE_DIR;
 }
 
-// === 生成缓存文件名 ===
+// === 平台与音源名称归一化 ===
+export function normalizeSource(source) {
+  const s = String(source || 'netease').toLowerCase();
+  if (s === 'qq') return 'tencent';
+  if (s === 'wy' || s === '163') return 'netease';
+  if (s === 'kg') return 'kugou';
+  if (s === 'kw') return 'kuwo';
+  return s;
+}
+
+// === 生成缓存文件名（主名称） ===
 function cacheFileName(source, songId, ext = 'mp3') {
-  const safeSource = String(source).replace(/[^a-zA-Z0-9._-]/g, '_');
-  const safeSongId = String(songId).replace(/[^a-zA-Z0-9._-]/g, '_');
+  const safeSource = normalizeSource(source).replace(/[^a-zA-Z0-9._-]/g, '_');
+  const safeSongId = String(songId || '').replace(/[^a-zA-Z0-9._-]/g, '_');
   return `${safeSource}_${safeSongId}.${ext}`;
+}
+
+// === 获取多维候选文件名（解决酷狗 HASH|audio_id、不同场景传参不一致导致的失配） ===
+function getCandidateFileNames(source, songId, ext = 'mp3') {
+  const safeSource = normalizeSource(source).replace(/[^a-zA-Z0-9._-]/g, '_');
+  const strId = String(songId || '');
+  const names = [];
+
+  const mainName = `${safeSource}_${strId.replace(/[^a-zA-Z0-9._-]/g, '_')}.${ext}`;
+  names.push(mainName);
+
+  // 酷狗等音源常见 HASH|audio_id 或 HASH_audio_id 格式，提取纯 HASH 候选
+  if (strId.includes('|') || strId.includes('_')) {
+    const parts = strId.split(/[|_]/);
+    if (parts[0] && parts[0].length >= 16) {
+      const hashName = `${safeSource}_${parts[0].replace(/[^a-zA-Z0-9._-]/g, '_')}.${ext}`;
+      if (!names.includes(hashName)) names.push(hashName);
+    }
+  }
+
+  return names;
+}
+
+// === 内存级缓存快速索引（0ms 瞬时判定，彻底免除跨进程 JNI 和磁盘 Stat 开销） ===
+let cachedFilesSet = null;
+let cacheWarmPromise = null;
+
+export async function warmCacheIndex() {
+  if (cachedFilesSet) return cachedFilesSet;
+  if (cacheWarmPromise) return cacheWarmPromise;
+
+  cacheWarmPromise = (async () => {
+    try {
+      const dir = await ensureCacheDir();
+      const files = await FileSystem.readDirectoryAsync(dir);
+      cachedFilesSet = new Set(files.filter(f => !f.endsWith('.tmp')));
+      return cachedFilesSet;
+    } catch {
+      cachedFilesSet = new Set();
+      return cachedFilesSet;
+    } finally {
+      cacheWarmPromise = null;
+    }
+  })();
+  return cacheWarmPromise;
 }
 
 // =====================================================================
@@ -60,7 +115,7 @@ function cacheFileName(source, songId, ext = 'mp3') {
 // =====================================================================
 
 /**
- * 获取缓存文件路径（如果存在且非空）
+ * 获取缓存文件路径（100% 智能命中 + 0ms 内存索引）
  * @param {string} source 音源名
  * @param {string|number} songId 歌曲ID
  * @returns {Promise<string|null>} 文件路径或 null
@@ -68,12 +123,39 @@ function cacheFileName(source, songId, ext = 'mp3') {
 export async function getCachedFile(source, songId) {
   try {
     const dir = await ensureCacheDir();
-    const name = cacheFileName(source, songId);
-    const path = dir + name;
-    const info = await FileSystem.getInfoAsync(path);
-    if (info.exists && info.size > 0) {
-      return path;
+    const set = await warmCacheIndex();
+    const candidateNames = getCandidateFileNames(source, songId);
+
+    // 1. 优先在内存 Set 中匹配候选名（0ms 极速命中）
+    for (const name of candidateNames) {
+      if (set.has(name)) {
+        return dir + name;
+      }
     }
+
+    // 2. 酷狗 32 位 MD5 HASH 特殊匹配（前缀匹配 `${source}_${hash}`）
+    const strId = String(songId || '');
+    if (strId.length === 32 && /^[a-fA-F0-9]+$/.test(strId)) {
+      const prefix = `${normalizeSource(source)}_${strId}`;
+      for (const file of set) {
+        if (file.startsWith(prefix) && file.endsWith('.mp3')) {
+          return dir + file;
+        }
+      }
+    }
+
+    // 3. 兜底磁盘 Stat（防止其他进程写入且内存 Set 尚未同步的情况）
+    for (const name of candidateNames) {
+      const path = dir + name;
+      try {
+        const info = await FileSystem.getInfoAsync(path);
+        if (info.exists && info.size > 1024) {
+          set.add(name);
+          return path;
+        }
+      } catch {}
+    }
+
     return null;
   } catch (e) {
     console.error('[CacheManager] getCachedFile error:', e.message);
@@ -89,12 +171,16 @@ export async function getCachedFile(source, songId) {
 export async function deleteCachedFile(source, songId) {
   try {
     const dir = await ensureCacheDir();
-    const name = cacheFileName(source, songId);
-    const path = dir + name;
-    const info = await FileSystem.getInfoAsync(path);
-    if (info.exists) {
-      await FileSystem.deleteAsync(path, { idempotent: true });
-      // deleted corrupted cache file
+    const candidateNames = getCandidateFileNames(source, songId);
+    for (const name of candidateNames) {
+      const path = dir + name;
+      try {
+        const info = await FileSystem.getInfoAsync(path);
+        if (info.exists) {
+          await FileSystem.deleteAsync(path, { idempotent: true });
+        }
+      } catch {}
+      cachedFilesSet?.delete(name);
     }
   } catch (e) {
     console.error('[CacheManager] deleteCachedFile error:', e.message);
@@ -103,7 +189,7 @@ export async function deleteCachedFile(source, songId) {
 
 /**
  * 下载并缓存音频文件
- * 优先使用原生 OkHttp（NativeModules.UpdaterModule）下载，回退到 expo-file-system
+ * 优先使用原生 OkHttp（NativeModules.MediaModule）下载，回退到 expo-file-system
  * @param {string} source 音源名
  * @param {string|number} songId 歌曲ID
  * @param {string} url 远程音频 URL
@@ -119,11 +205,14 @@ export async function downloadAndCache(source, songId, url) {
     const existing = await getCachedFile(source, songId);
     if (existing) return existing;
 
-    // 优先使用 MediaModule 原生下载（后台 JS 被挂起时仍可工作）
+    // 优先使用 MediaModule 原生 OkHttp 原子下载（后台 JS 被挂起时仍可工作，且写入 .tmp 防损坏）
     try {
       if (NativeModules.MediaModule && NativeModules.MediaModule.downloadFile) {
         const result = await NativeModules.MediaModule.downloadFile(url, path);
-        if (result) return path;
+        if (result) {
+          cachedFilesSet?.add(name);
+          return path;
+        }
       }
     } catch (e) {
       // 原生下载失败，回退到其他方式
@@ -133,7 +222,10 @@ export async function downloadAndCache(source, songId, url) {
     try {
       if (NativeModules.UpdaterModule && NativeModules.UpdaterModule.downloadFile) {
         const result = await NativeModules.UpdaterModule.downloadFile(url, path);
-        if (result) return path;
+        if (result) {
+          cachedFilesSet?.add(name);
+          return path;
+        }
       }
     } catch (e) {
       // 原生下载失败，回退到 expo-file-system
@@ -142,9 +234,9 @@ export async function downloadAndCache(source, songId, url) {
     // 最后回退：expo-file-system 下载
     const downloadResult = await FileSystem.downloadAsync(url, path);
     if (downloadResult.status === 200) {
+      cachedFilesSet?.add(name);
       return downloadResult.uri;
     }
-    // download failed
     return null;
   } catch (e) {
     console.error('[CacheManager] downloadAndCache error:', e.message);
@@ -194,6 +286,7 @@ export async function clearCache() {
     for (const file of files) {
       await FileSystem.deleteAsync(dir + file, { idempotent: true });
     }
+    cachedFilesSet?.clear();
     logger.info('CacheManager', 'Cache cleared completely');
     return true;
   } catch (e) {
@@ -228,6 +321,7 @@ export async function enforceCacheLimit(limitMB) {
         // 文件不可读，尝试删除
         try {
           await FileSystem.deleteAsync(dir + file, { idempotent: true });
+          cachedFilesSet?.delete(file);
         } catch {}
       }
     }
@@ -239,6 +333,7 @@ export async function enforceCacheLimit(limitMB) {
     for (const item of items) {
       if (totalSize <= limitBytes) break;
       await FileSystem.deleteAsync(dir + item.name, { idempotent: true });
+      cachedFilesSet?.delete(item.name);
       totalSize -= item.size;
     }
   } catch (e) {

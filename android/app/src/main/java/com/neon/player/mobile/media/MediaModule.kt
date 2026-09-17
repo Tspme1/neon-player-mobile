@@ -39,6 +39,29 @@ class MediaModule(reactContext: ReactApplicationContext) :
         // 全局耳机断开/拔出时间戳
         @Volatile
         var lastNoisyTime = 0L
+
+        // 全局原生日志环形缓冲区（最多 1000 条，供 AI 实时调阅，线程安全）
+        private const val MAX_NATIVE_LOGS = 1000
+        private val nativeLogQueue = java.util.ArrayDeque<String>(MAX_NATIVE_LOGS)
+        private val logLock = Any()
+
+        fun appendNativeLog(logLine: String) {
+            val trimmed = logLine.trim()
+            if (trimmed.isEmpty()) return
+            synchronized(logLock) {
+                if (nativeLogQueue.size >= MAX_NATIVE_LOGS) {
+                    nativeLogQueue.pollFirst()
+                }
+                nativeLogQueue.addLast(trimmed)
+            }
+        }
+
+        fun getNativeLogs(limit: Int = 200): List<String> {
+            synchronized(logLock) {
+                val list = nativeLogQueue.toList()
+                return if (list.size <= limit) list else list.takeLast(limit)
+            }
+        }
     }
 
     private var isServiceRunning = false
@@ -65,6 +88,7 @@ class MediaModule(reactContext: ReactApplicationContext) :
 
     init {
         MediaService.reactContext = reactContext
+        LogServer.start(reactContext)
         try {
             val filter = IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -311,16 +335,28 @@ class MediaModule(reactContext: ReactApplicationContext) :
                             promise.reject("DOWNLOAD_ERROR", "HTTP ${response.code}")
                             return
                         }
-                        val file = java.io.File(cleanPath)
-                        file.parentFile?.mkdirs()
+                        val tempFile = java.io.File("$cleanPath.tmp")
+                        tempFile.parentFile?.mkdirs()
                         response.body?.byteStream()?.use { input ->
-                            java.io.FileOutputStream(file).use { output ->
+                            java.io.FileOutputStream(tempFile).use { output ->
                                 input.copyTo(output)
                                 output.flush()
                             }
                         }
-                        Log.d("MediaModule", "[downloadFile] success: $cleanPath (${file.length()} bytes)")
-                        promise.resolve(cleanPath)
+                        val finalFile = java.io.File(cleanPath)
+                        if (tempFile.length() > 0) {
+                            if (finalFile.exists()) finalFile.delete()
+                            if (tempFile.renameTo(finalFile)) {
+                                Log.d("MediaModule", "[downloadFile] atomic success: $cleanPath (${finalFile.length()} bytes)")
+                                promise.resolve(cleanPath)
+                            } else {
+                                tempFile.delete()
+                                promise.reject("DOWNLOAD_ERROR", "Failed to rename temp file")
+                            }
+                        } else {
+                            tempFile.delete()
+                            promise.reject("DOWNLOAD_ERROR", "Downloaded file is empty")
+                        }
                     } catch (e: Exception) {
                         Log.e("MediaModule", "[downloadFile] error: ${e.message}")
                         promise.reject("DOWNLOAD_ERROR", e.message)
@@ -383,6 +419,32 @@ class MediaModule(reactContext: ReactApplicationContext) :
         } catch (e: Exception) {
             Log.e("MediaModule", "[appendToFile] error: ${e.message}")
             promise.reject("APPEND_ERROR", e.message)
+        }
+    }
+
+    // 同步将 JS 产生的日志输出到 Android 原生 Logcat 并推入原生内存环形缓冲区
+    @ReactMethod
+    fun logToNative(level: String, tag: String, logLine: String) {
+        appendNativeLog(logLine)
+        when (level.uppercase()) {
+            "ERROR" -> Log.e("NeonLogger", "[$tag] $logLine")
+            "WARN" -> Log.w("NeonLogger", "[$tag] $logLine")
+            else -> Log.i("NeonLogger", "[$tag] $logLine")
+        }
+    }
+
+    // 供 JS 或调测调阅当前内存环形日志
+    @ReactMethod
+    fun getRecentLogs(limit: Int, promise: Promise) {
+        try {
+            val logs = getNativeLogs(limit)
+            val arr = Arguments.createArray()
+            for (line in logs) {
+                arr.pushString(line)
+            }
+            promise.resolve(arr)
+        } catch (e: Exception) {
+            promise.reject("GET_LOGS_ERROR", e.message)
         }
     }
 

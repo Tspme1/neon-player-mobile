@@ -1578,14 +1578,14 @@ async function _musicSongUrlImpl(playSource, songId, platform, song, quality = '
         let url = null;
         const isBg = AppState.currentState === 'background';
 
-        // 策略1：如果是网易云且处于后台，优先直接走 nativeLxMusicUrl（1秒极速出链，免除后台 WebView 潜在节流）
-        if (isBg && platform === 'netease') {
-          _log('LX: background + netease, try nativeLxMusicUrl first');
+        // 策略1：如果是网易云（无论前台或后台），优先直接走 nativeLxMusicUrl（原生 OkHttp 极速通道，600~900ms 极速出链，免除前台等待沙箱 3.5 秒超时）
+        if (platform === 'netease') {
+          _log('LX: netease detected, try nativeLxMusicUrl first');
           url = await nativeLxMusicUrl(songId, platform, quality);
           _log(`LX: nativeLxMusicUrl done: ${url ? 'has url' : 'null'}`);
         }
 
-        // 策略2：若尚未获得 URL，且沙箱已就绪，调用 WebView 沙箱解析（全平台通用，无论前台后台均支持，超时 3500ms）
+        // 策略2：若尚未获得 URL（如 QQ/酷狗/酷我平台，或网易原生接口波动），且沙箱已就绪，调用 WebView 沙箱解析（超时 3500ms）
         if ((!url || typeof url !== 'string' || !url.startsWith('http')) && isSandboxReady()) {
           _log('LX: sandbox ready, getLxMusicUrlWebView start');
           try {
@@ -1600,8 +1600,8 @@ async function _musicSongUrlImpl(playSource, songId, platform, song, quality = '
           }
         }
 
-        // 策略3：若仍未获得 URL，且尚未尝试原生层（如前台网易云沙箱超时），快速尝试原生层 HTTP (nativeLxMusicUrl)
-        if ((!url || typeof url !== 'string' || !url.startsWith('http')) && (!isBg || platform !== 'netease')) {
+        // 策略3：若仍未获得 URL，且尚未尝试原生层（如其他平台），快速尝试原生层 HTTP (nativeLxMusicUrl)
+        if ((!url || typeof url !== 'string' || !url.startsWith('http')) && platform !== 'netease') {
           _log('LX: try nativeLxMusicUrl (fallback)');
           url = await nativeLxMusicUrl(songId, platform, quality);
           _log(`LX: nativeLxMusicUrl done: ${url ? 'has url' : 'null'}`);

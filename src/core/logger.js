@@ -5,7 +5,7 @@ import { NativeModules, Platform } from 'react-native';
 import * as Sharing from 'expo-sharing';
 
 const LOG_DIR = (FileSystem.documentDirectory || '') + 'logs/';
-const MAX_MEMORY_LOGS = 200;           // 内存保留最新行数，供即时排查与查看
+const MAX_MEMORY_LOGS = 1000;          // 内存保留最新行数，供即时排查与 AI 调阅
 const MAX_RETENTION_DAYS = 3;          // 磁盘最多保留 3 天日志
 const MAX_TOTAL_SIZE_BYTES = 5 * 1024 * 1024; // 日志目录最大 5 MB
 const BATCH_FLUSH_COUNT = 25;          // 待写队列达到 25 条立即批量刷盘
@@ -78,7 +78,14 @@ class Logger {
     // 2. 推入待写队列
     this._writeQueue.push(logLine);
 
-    // 3. 同时透传到开发调试控制台
+    // 3. 同时透传至原生 Android Logcat 及原生内存环形缓冲区（供 AI 实时通过 HTTP 或 ADB 调阅）
+    try {
+      if (NativeModules.MediaModule && NativeModules.MediaModule.logToNative) {
+        NativeModules.MediaModule.logToNative(level, tag, logLine);
+      }
+    } catch {}
+
+    // 4. 同时透传到开发调试控制台
     if (__DEV__) {
       if (level === 'ERROR') {
         console.error(`[${tag}]`, message, ...args);
@@ -89,12 +96,20 @@ class Logger {
       }
     }
 
-    // 4. 触发条件式异步刷盘（错误立即刷盘，或累积超阈值，或防抖定时器）
+    // 5. 触发条件式异步刷盘（错误立即刷盘，或累积超阈值，或防抖定时器）
     if (level === 'ERROR' || this._writeQueue.length >= BATCH_FLUSH_COUNT) {
       this.scheduleFlush(0);
     } else {
       this.scheduleFlush(FLUSH_DEBOUNCE_MS);
     }
+  }
+
+  /**
+   * 获取最近的内存日志行数 (供外部即时调阅)
+   */
+  getRecentLogs(limit = 100) {
+    if (this._memoryLogs.length <= limit) return [...this._memoryLogs];
+    return this._memoryLogs.slice(this._memoryLogs.length - limit);
   }
 
   /**

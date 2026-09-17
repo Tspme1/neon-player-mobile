@@ -38,6 +38,8 @@ class MediaService : Service() {
 
     companion object {
         var reactContext: com.facebook.react.bridge.ReactContext? = null
+        @Volatile
+        var instance: MediaService? = null
 
         private const val CHANNEL_ID = "neon_media_playback"
         private const val NOTIFICATION_ID = 1
@@ -67,15 +69,15 @@ class MediaService : Service() {
     private var httpClient: OkHttpClient? = null
     private val executor = Executors.newSingleThreadExecutor()
 
-    // Current state
-    private var currentTitle: String = ""
-    private var currentArtist: String = ""
-    private var currentArtworkUrl: String = ""
-    private var currentArtworkBitmap: Bitmap? = null
-    private var currentDuration: Long = 0L
-    private var currentIsPlaying: Boolean = false
-    private var currentPosition: Long = 0L
-    private var currentIsFavorited: Boolean = false
+    // Current state (internal so LogServer can inspect)
+    internal var currentTitle: String = ""
+    internal var currentArtist: String = ""
+    internal var currentArtworkUrl: String = ""
+    internal var currentArtworkBitmap: Bitmap? = null
+    internal var currentDuration: Long = 0L
+    internal var currentIsPlaying: Boolean = false
+    internal var currentPosition: Long = 0L
+    internal var currentIsFavorited: Boolean = false
 
     private fun sendControlEvent(eventName: String) {
         val ctx = reactContext
@@ -130,6 +132,8 @@ class MediaService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
+        LogServer.start(this)
 
         // Create notification channel
         val channel = NotificationChannel(
@@ -401,8 +405,168 @@ class MediaService : Service() {
 
     override fun onDestroy() {
         cleanup()
+        if (instance == this) {
+            instance = null
+        }
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 }
+
+/**
+ * 嵌入式超轻量 HTTP 日志与诊断服务 (供 AI 与本地实时调试调阅)
+ * 监听内部端口 18088，无连接时阻塞在 OS 内核 accept()，CPU 占用 0.00%
+ */
+object LogServer {
+    private var serverSocket: java.net.ServerSocket? = null
+    private var serverThread: Thread? = null
+    @Volatile
+    private var isRunning = false
+
+    fun start(context: Context) {
+        if (isRunning) return
+        isRunning = true
+        val appContext = context.applicationContext
+        serverThread = Thread({
+            try {
+                val ss = java.net.ServerSocket(18088, 50, java.net.InetAddress.getByName("0.0.0.0")).apply {
+                    reuseAddress = true
+                }
+                serverSocket = ss
+                Log.i("LogServer", "NeonPlayer LogServer listening on http://0.0.0.0:18088")
+                while (isRunning && !ss.isClosed) {
+                    try {
+                        val client = ss.accept()
+                        handleClient(client, appContext)
+                    } catch (e: Exception) {
+                        if (!isRunning) break
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w("LogServer", "LogServer failed to start on 18088: ${e.message}")
+            }
+        }, "Neon-LogServer").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    fun stop() {
+        isRunning = false
+        try {
+            serverSocket?.close()
+        } catch (e: Exception) {}
+        serverSocket = null
+        serverThread = null
+    }
+
+    private fun handleClient(client: java.net.Socket, context: Context) {
+        Thread({
+            try {
+                client.soTimeout = 5000
+                val reader = java.io.BufferedReader(java.io.InputStreamReader(client.getInputStream()))
+                val requestLine = reader.readLine() ?: return@Thread
+                val parts = requestLine.split(" ")
+                val uri = if (parts.size > 1) parts[1] else "/"
+
+                val (statusCode, contentType, bodyBytes) = when {
+                    uri.startsWith("/ping") -> {
+                        val json = "{\"status\":\"ok\",\"app\":\"NeonPlayer\",\"version\":\"1.00.017\",\"timestamp\":${System.currentTimeMillis()}}"
+                        Triple("200 OK", "application/json; charset=utf-8", json.toByteArray(Charsets.UTF_8))
+                    }
+                    uri.startsWith("/logs/today") -> {
+                        val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(java.util.Date())
+                        val logFile = java.io.File(context.filesDir, "logs/app_$today.log")
+                        if (logFile.exists()) {
+                            val bytes = logFile.readBytes()
+                            Triple("200 OK", "text/plain; charset=utf-8", bytes)
+                        } else {
+                            val msg = "Today log file not found at: ${logFile.absolutePath}"
+                            Triple("404 Not Found", "text/plain; charset=utf-8", msg.toByteArray(Charsets.UTF_8))
+                        }
+                    }
+                    uri.startsWith("/logs") -> {
+                        var limit = 200
+                        val qIndex = uri.indexOf("limit=")
+                        if (qIndex != -1) {
+                            val limitStr = uri.substring(qIndex + 6).split("&")[0]
+                            limit = limitStr.toIntOrNull() ?: 200
+                        }
+                        val logs = MediaModule.getNativeLogs(limit)
+                        val content = if (logs.isEmpty()) "(No logs recorded in memory buffer yet)" else logs.joinToString("\n")
+                        Triple("200 OK", "text/plain; charset=utf-8", content.toByteArray(Charsets.UTF_8))
+                    }
+                    uri.startsWith("/cache") -> {
+                        val cacheDir = java.io.File(context.filesDir, "music-cache")
+                        val files = cacheDir.listFiles() ?: emptyArray()
+                        val cacheArr = org.json.JSONArray()
+                        var totalBytes = 0L
+                        for (f in files) {
+                            if (!f.name.endsWith(".tmp")) {
+                                totalBytes += f.length()
+                                val fObj = org.json.JSONObject().apply {
+                                    put("name", f.name)
+                                    put("size", f.length())
+                                    put("lastModified", f.lastModified())
+                                }
+                                cacheArr.put(fObj)
+                            }
+                        }
+                        val resObj = org.json.JSONObject().apply {
+                            put("cacheDir", cacheDir.absolutePath)
+                            put("fileCount", cacheArr.length())
+                            put("totalSizeMB", String.format(java.util.Locale.US, "%.2f", totalBytes / (1024.0 * 1024.0)))
+                            put("files", cacheArr)
+                        }
+                        Triple("200 OK", "application/json; charset=utf-8", resObj.toString(2).toByteArray(Charsets.UTF_8))
+                    }
+                    uri.startsWith("/status") -> {
+                        val svc = MediaService.instance
+                        val statusObj = org.json.JSONObject().apply {
+                            put("app", "Neon Player")
+                            put("version", "1.00.017")
+                            put("title", svc?.currentTitle ?: "")
+                            put("artist", svc?.currentArtist ?: "")
+                            put("isPlaying", svc?.currentIsPlaying ?: false)
+                            put("duration", svc?.currentDuration ?: 0L)
+                            put("position", svc?.currentPosition ?: 0L)
+                            put("isFavorited", svc?.currentIsFavorited ?: false)
+                            put("bufferedLogLines", MediaModule.getNativeLogs(1000).size)
+                        }
+                        Triple("200 OK", "application/json; charset=utf-8", statusObj.toString(2).toByteArray(Charsets.UTF_8))
+                    }
+                    else -> {
+                        val help = """
+===================================================
+Neon Player Mobile v1.00.017 Diagnostic API
+===================================================
+Available Endpoints:
+  GET /logs         - Retrieve recent logs (?limit=200)
+  GET /logs/today   - Retrieve entire today's log file
+  GET /status       - Current playback and service status (JSON)
+  GET /ping         - Health check & version info
+===================================================
+""".trimIndent()
+                        Triple("200 OK", "text/plain; charset=utf-8", help.toByteArray(Charsets.UTF_8))
+                    }
+                }
+
+                val out = client.getOutputStream()
+                val responseHeader = "HTTP/1.1 $statusCode\r\n" +
+                        "Content-Type: $contentType\r\n" +
+                        "Content-Length: ${bodyBytes.size}\r\n" +
+                        "Access-Control-Allow-Origin: *\r\n" +
+                        "Connection: close\r\n\r\n"
+                out.write(responseHeader.toByteArray(Charsets.UTF_8))
+                out.write(bodyBytes)
+                out.flush()
+            } catch (e: Exception) {
+                // connection error or client disconnect
+            } finally {
+                try { client.close() } catch (e: Exception) {}
+            }
+        }, "Neon-LogClient").start()
+    }
+}
+

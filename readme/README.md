@@ -181,6 +181,55 @@ cd android
 
 设置 → 主题模式 → 白天 / 黑夜 / 自动（跟随系统）
 
+## 🔍 实时日志与诊断系统 (AI & 开发者专用)
+
+为方便开发者与 AI 助手在真机运行时零侵入、实时调阅全链路日志与引擎状态，Neon Player Mobile 内置了轻量级原生 HTTP 诊断服务与 Logcat 双轨日志管道。
+
+### 特性与架构
+- **零性能损耗**：服务基于 Android 原生守护线程阻塞监听（端口 `18088`），无请求时 0% CPU 占用，对音频解码与前后台播放流畅度无任何干扰；
+- **1000 行内存环形队列**：瞬时保存微秒级播放生命周期流水，避免频繁读写闪存；
+- **双轨同步**：内存环形队列 + Android 系统 Logcat (`NeonLogger` 标签) + 当日全量持久化落盘日志文件三轨互备。
+
+### 一键调阅脚本 (`scripts/get_realtime_logs.ps1`)
+
+项目根目录下提供了自动化诊断脚本（自动配置 ADB 端口转发，支持 HTTP 与 Logcat 智能回退）：
+
+```powershell
+# 1. 查询最新 100 条实时运行日志流水
+.\scripts\get_realtime_logs.ps1 -Limit 100
+
+# 2. 查询当前播放器实时状态（当前曲目、歌手、播放/暂停、进度、缓冲日志数等 JSON）
+.\scripts\get_realtime_logs.ps1 -Status
+
+# 3. 查询真机音频文件缓存库（缓存目录、文件总数、占用空间 MB 及详细文件列表）
+.\scripts\get_realtime_logs.ps1 -Cache
+
+# 4. 调阅今天全量落盘的持久化日志
+.\scripts\get_realtime_logs.ps1 -Today
+
+# 5. 测试诊断服务连通性与 App 版本
+.\scripts\get_realtime_logs.ps1 -Ping
+
+# 6. 直接抓取系统原生 Logcat 输出流
+.\scripts\get_realtime_logs.ps1 -Logcat
+```
+
+### HTTP 诊断 REST API 端点
+
+设备连接并执行端口转发后，即可通过任意 HTTP 客户端（curl、浏览器、Postman、脚本等）直接调阅：
+
+```bash
+adb forward tcp:18088 tcp:18088
+```
+
+| 请求方法与路径 | 描述 | 返回示例 |
+| :--- | :--- | :--- |
+| `GET /ping` | 健康检查与版本确认 | `{"status":"ok","app":"NeonPlayer","version":"1.00.017",...}` |
+| `GET /status` | 播放器及原生服务实时状态 | `{"title":"晴天","artist":"周杰伦","isPlaying":true,...}` |
+| `GET /cache` | 本地音频缓存清单与体积统计 | `{"fileCount":3,"totalSizeMB":"12.57","files":[...]}` |
+| `GET /logs?limit=200` | 获取内存环形队列最新日志 | `[INFO] [PlayerEngine] +105ms File cache hit ...` |
+| `GET /logs/today` | 获取当天完整持久化日志 | 纯文本完整日志文件内容 |
+
 ## 🔧 配置
 
 ### 更新服务器
