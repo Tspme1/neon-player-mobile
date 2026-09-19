@@ -128,6 +128,9 @@ class MediaService : Service() {
         override fun onSkipToNext() { sendControlEvent("next") }
         override fun onSkipToPrevious() { sendControlEvent("prev") }
         override fun onStop() { sendControlEvent("stop") }
+        override fun onSeekTo(pos: Long) {
+            sendControlEvent("seek:$pos")
+        }
     }
 
     override fun onCreate() {
@@ -287,7 +290,8 @@ class MediaService : Service() {
                     PlaybackStateCompat.ACTION_PLAY_PAUSE or
                     PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
                     PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
-                    PlaybackStateCompat.ACTION_STOP
+                    PlaybackStateCompat.ACTION_STOP or
+                    PlaybackStateCompat.ACTION_SEEK_TO
                 )
                 .setState(state, currentPosition * 1000, 1.0f)
                 .build()

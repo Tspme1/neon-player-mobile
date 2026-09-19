@@ -129,6 +129,14 @@ class MediaModule(reactContext: ReactApplicationContext) :
         .cookieJar(cookieJar)
         .build()
 
+    // 专用下载 Client：不设 callTimeout（整文件耗时不受限），设置合理的流读取超时，确保大音频文件可靠落盘
+    private val downloadClient = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
+
     @ReactMethod
     fun initMediaSession() {
         MediaService.reactContext = reactApplicationContext
@@ -323,7 +331,7 @@ class MediaModule(reactContext: ReactApplicationContext) :
                 .header("Accept", "*/*")
                 .build()
             
-            urlClient.newCall(request).enqueue(object : okhttp3.Callback {
+            downloadClient.newCall(request).enqueue(object : okhttp3.Callback {
                 override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
                     Log.e("MediaModule", "[downloadFile] failed: ${e.message}")
                     promise.reject("DOWNLOAD_ERROR", e.message)

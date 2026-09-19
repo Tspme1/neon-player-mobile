@@ -69,6 +69,9 @@ let isCurrentFileCached = false; // 当前音轨是否来自本地文件或完�
 let volume = 0.8;
 let isMuted = false;
 let userPaused = false; // true when user explicitly paused (not interrupted by other apps)
+let lastNativeIsPlaying = false; // 底层原生 ExoPlayer 报告的真实播放状态
+let bufferingStartTime = 0;      // 缓冲开始时间戳，用于防抖与看门狗超时监控
+let isRecoveringStalledStream = false; // 是否正在进行流停滞自动恢复
 
 // 当前在线歌曲信息
 let currentOnlineSong = null;
@@ -144,11 +147,65 @@ function isRecentlyNoisy() {
   }
 }
 
+async function recoverStalledPlayback() {
+  if (isRecoveringStalledStream || userPaused || !currentOnlineSong) return;
+  isRecoveringStalledStream = true;
+  const songId = currentOnlineSong.id || currentOnlineSong.songId;
+  logger.warn('PlayerEngine', 'Stream stalled for >8s, attempting silent re-resolve & resume', {
+    songId,
+    position,
+  });
+
+  const savedPos = position;
+  const song = currentOnlineSong;
+  try {
+    const settings = await loadSettings();
+    const playSource = settings.playSource || 'official';
+    const resolved = await resolvePlayableUrlCascade(song, playSource);
+    if (resolved && resolved.url && soundObject) {
+      logger.info('PlayerEngine', 'Stream recovered with new URL, resuming playback', {
+        url: resolved.url.substring(0, 60),
+      });
+      const oldSound = soundObject;
+      const { sound: newSound } = await Audio.Sound.createAsync(
+        { uri: normalizeAudioUri(resolved.url) },
+        {
+          shouldPlay: true,
+          positionMillis: savedPos > 0 ? savedPos : 0,
+          progressUpdateIntervalMillis: 100,
+          volume,
+          isMuted,
+          isLooping: playMode === 'repeat-one',
+        },
+        null,
+        false
+      );
+      soundObject = newSound;
+      setupPlaybackStatusUpdate();
+      try {
+        oldSound.setOnPlaybackStatusUpdate(null);
+        await oldSound.unloadAsync();
+      } catch {}
+      isPlaying = true;
+      lastNativeIsPlaying = true;
+      bufferingStartTime = 0;
+      emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: true, position: savedPos, duration });
+      return;
+    }
+  } catch (e) {
+    logger.error('PlayerEngine', 'Stream recovery failed', e);
+  } finally {
+    isRecoveringStalledStream = false;
+  }
+}
+
 function setupPlaybackStatusUpdate() {
   if (!soundObject) return;
   soundObject.setOnPlaybackStatusUpdate((status) => {
     try {
       if (status.isLoaded) {
+        lastNativeIsPlaying = !!status.isPlaying;
+
         // 用户跳转拖动时，阻止底层滞后的旧进度刷新反冲 UI
         if (!isSeeking) {
           position = status.positionMillis || 0;
@@ -158,10 +215,21 @@ function setupPlaybackStatusUpdate() {
 
         if (status.isPlaying) {
           isInitialPlaybackStarted = true;
+          bufferingStartTime = 0;
+        } else if (isBuffering) {
+          if (bufferingStartTime === 0) {
+            bufferingStartTime = Date.now();
+          } else if (Date.now() - bufferingStartTime > 8000 && !userPaused && isInitialPlaybackStarted && !isCurrentFileCached) {
+            // 连续缓冲超过 8 秒且无声音，触发流失效自动重连看门狗
+            recoverStalledPlayback();
+          }
+        } else {
+          bufferingStartTime = 0;
         }
 
-        // 当处于缓冲中或正在跳转(seek)时，维持播放意图，避免状态抖动导致UI闪现暂停图标
-        const effectivePlaying = (isBuffering || isSeeking) ? isPlaying : status.isPlaying;
+        // 短暂缓冲(<4秒)或正在跳转(seek)时维持播放意图；超过4秒如实反映非播放状态，解除按钮假死
+        const isTransientBuffering = isBuffering && (bufferingStartTime > 0 && Date.now() - bufferingStartTime < 4000);
+        const effectivePlaying = (isTransientBuffering || isSeeking) ? isPlaying : status.isPlaying;
         const playingChanged = effectivePlaying !== isPlaying;
         if (playingChanged) {
           isPlaying = effectivePlaying;
@@ -195,16 +263,64 @@ function setupPlaybackStatusUpdate() {
         // 自动播放下一首或单曲循环
         if (status.didJustFinish) {
           if (playMode === 'repeat-one') {
-            logger.info('PlayerEngine', 'repeat-one didJustFinish', { isLooping: !!status.isLooping });
+            logger.info('PlayerEngine', 'repeat-one didJustFinish', { isLooping: !!status.isLooping, isCached: isCurrentFileCached });
             position = 0;
             isPlaying = true;
             emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: true, position: 0, duration });
             updateHighlight(0);
-            // 底层 ExoPlayer 在 isLooping=true 时已由原生层无缝自动循环，严禁再调用 replayAsync()，避免开头重播两次
-            if (!status.isLooping && soundObject) {
-              soundObject.replayAsync().catch(e => {
-                logger.error('PlayerEngine', 'replayAsync error', e);
-              });
+
+            // 核心修复：单曲循环平滑热迁移到本地文件
+            // 如果当前曲目原本使用的是远程 URL（非本地缓存），检查此刻本地是否已完成下载
+            if (!isCurrentFileCached && currentOnlineSong && soundObject) {
+              const songId = currentOnlineSong.id || currentOnlineSong.songId;
+              const platform = currentOnlineSong.platform || currentOnlineSong._platform || 'netease';
+              (async () => {
+                try {
+                  const cachedPath = await getCachedFile(platform, songId);
+                  if (cachedPath && soundObject) {
+                    logger.info('PlayerEngine', `repeat-one: hot handover to local cache: ${cachedPath}`);
+                    isCurrentFileCached = true;
+                    playUri = cachedPath;
+                    const oldSound = soundObject;
+                    const { sound: newSound } = await Audio.Sound.createAsync(
+                      { uri: normalizeAudioUri(cachedPath) },
+                      {
+                        shouldPlay: true,
+                        progressUpdateIntervalMillis: 100,
+                        volume,
+                        isMuted,
+                        isLooping: true,
+                      },
+                      null,
+                      false
+                    );
+                    soundObject = newSound;
+                    setupPlaybackStatusUpdate();
+                    try {
+                      oldSound.setOnPlaybackStatusUpdate(null);
+                      await oldSound.unloadAsync();
+                    } catch {}
+                    logger.info('PlayerEngine', 'repeat-one: hot handover to local cache SUCCESS');
+                    return;
+                  }
+                } catch (handoverErr) {
+                  logger.warn('PlayerEngine', 'repeat-one cache handover failed', handoverErr?.message);
+                }
+
+                // 若未能切成本地缓存，且原生未自循环，执行 replayAsync
+                if (!status.isLooping && soundObject) {
+                  soundObject.replayAsync().catch(e => {
+                    logger.error('PlayerEngine', 'replayAsync error', e);
+                  });
+                }
+              })();
+            } else {
+              // 底层 ExoPlayer 在 isLooping=true 时已由原生层无缝自动循环，严禁再调用 replayAsync()，避免开头重播两次
+              if (!status.isLooping && soundObject) {
+                soundObject.replayAsync().catch(e => {
+                  logger.error('PlayerEngine', 'replayAsync error', e);
+                });
+              }
             }
           } else {
             if (soundObject) {
@@ -214,10 +330,16 @@ function setupPlaybackStatusUpdate() {
           }
         }
       } else if (status.error) {
-        console.error(`[PlayerEngine] Playback error: ${status.error}`);
+        logger.error('PlayerEngine', `Playback error: ${status.error}`);
         isPlaying = false;
+        lastNativeIsPlaying = false;
         emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position, duration });
-        showToast('播放异常');
+        // 如果是远程流在后台出错且未被用户主动暂停，触发自动重连恢复
+        if (!userPaused && currentOnlineSong && !isCurrentFileCached) {
+          recoverStalledPlayback();
+        } else {
+          showToast('播放异常');
+        }
       }
     } catch (statusErr) {
       logger.error('PlayerEngine', 'onPlaybackStatusUpdate error', statusErr);
@@ -1177,7 +1299,10 @@ export function initPlayerEngine() {
     logger.info('PlayerEngine', 'control action received', { action });
     switch (action) {
       case 'play':
-        if (!isPlaying) togglePlay();
+        // 若当前未播放，或底层 soundObject 未在发声，强制唤醒播放
+        if (!isPlaying || !soundObject || !lastNativeIsPlaying) {
+          togglePlay();
+        }
         break;
       case 'noisy_pause':
       case 'pause':
@@ -1200,6 +1325,14 @@ export function initPlayerEngine() {
         if (track) emit(EVENTS.FAVORITE_TOGGLE, { track });
         break;
       }
+      default:
+        if (action && typeof action === 'string' && action.startsWith('seek:')) {
+          const seekPos = parseFloat(action.slice(5));
+          if (!isNaN(seekPos) && seekPos >= 0) {
+            seekTo(seekPos);
+          }
+        }
+        break;
     }
   });
 }

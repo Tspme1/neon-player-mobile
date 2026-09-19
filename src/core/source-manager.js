@@ -45,48 +45,68 @@ async function nativeLxMusicUrl(songId, platform = 'netease', quality = 'standar
   
   for (let i = 0; i < apis.length; i++) {
     const apiUrl = apis[i];
-    try {
-      _log(`API ${i + 1}/${apis.length} start: ${apiUrl.substring(0, 80)}...`);
-      const { NativeModules } = await import('react-native');
-      if (!NativeModules.MediaModule || !NativeModules.MediaModule.nativeHttpGet) {
-        _log('nativeHttpGet not available');
-        continue;
-      }
-      const headers = JSON.stringify({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://music.163.com/',
-      });
-      const responseText = await withTimeout(
-        NativeModules.MediaModule.nativeHttpGet(apiUrl, headers),
-        2500,
-        `nativeLx-api-${i + 1}`
-      );
-      _log(`API ${i + 1} response: ${responseText ? responseText.substring(0, 120) : 'empty'}`);
-      if (!responseText) continue;
-      
-      let data;
+    // API 1 遇到网络波动支持重试 1 次（最多尝试 2 次）
+    const maxAttempts = i === 0 ? 2 : 1;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        data = JSON.parse(responseText);
-      } catch {
-        _log(`API ${i + 1} JSON parse failed`);
-        continue;
+        const attemptLabel = maxAttempts > 1 ? ` (attempt ${attempt}/${maxAttempts})` : '';
+        _log(`API ${i + 1}/${apis.length}${attemptLabel} start: ${apiUrl.substring(0, 80)}...`);
+        const { NativeModules } = await import('react-native');
+        if (!NativeModules.MediaModule || !NativeModules.MediaModule.nativeHttpGet) {
+          _log('nativeHttpGet not available');
+          break;
+        }
+        const headers = JSON.stringify({
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Referer': 'https://music.163.com/',
+        });
+        const responseText = await withTimeout(
+          NativeModules.MediaModule.nativeHttpGet(apiUrl, headers),
+          2500,
+          `nativeLx-api-${i + 1}${attempt > 1 ? '-retry' : ''}`
+        );
+        _log(`API ${i + 1}${attemptLabel} response: ${responseText ? responseText.substring(0, 120) : 'empty'}`);
+        if (!responseText) {
+          if (attempt < maxAttempts) {
+            _log(`API ${i + 1} empty response, retry once due to network fluctuation`);
+            continue;
+          }
+          break;
+        }
+        
+        let data;
+        try {
+          data = JSON.parse(responseText);
+        } catch {
+          _log(`API ${i + 1}${attemptLabel} JSON parse failed`);
+          if (attempt < maxAttempts) continue;
+          break;
+        }
+        
+        if (data.url && typeof data.url === 'string' && data.url.startsWith('http')) {
+          _log(`API ${i + 1}${attemptLabel} OK: url found`);
+          return data.url;
+        }
+        if (data.data && data.data.url) {
+          _log(`API ${i + 1}${attemptLabel} OK: data.url found`);
+          return data.data.url;
+        }
+        if (data.musicUrl) {
+          _log(`API ${i + 1}${attemptLabel} OK: musicUrl found`);
+          return data.musicUrl;
+        }
+        _log(`API ${i + 1}${attemptLabel} no url in response`);
+        if (attempt < maxAttempts) {
+          _log(`API ${i + 1} no url, retry once`);
+          continue;
+        }
+      } catch (e) {
+        _log(`API ${i + 1} error on attempt ${attempt}: ${e.message}`);
+        if (attempt < maxAttempts) {
+          _log(`API ${i + 1} will retry once due to network fluctuation`);
+          continue;
+        }
       }
-      
-      if (data.url && typeof data.url === 'string' && data.url.startsWith('http')) {
-        _log(`API ${i + 1} OK: url found`);
-        return data.url;
-      }
-      if (data.data && data.data.url) {
-        _log(`API ${i + 1} OK: data.url found`);
-        return data.data.url;
-      }
-      if (data.musicUrl) {
-        _log(`API ${i + 1} OK: musicUrl found`);
-        return data.musicUrl;
-      }
-      _log(`API ${i + 1} no url in response`);
-    } catch (e) {
-      _log(`API ${i + 1} error: ${e.message}`);
     }
   }
   _log('all APIs exhausted, return null');
@@ -1578,20 +1598,70 @@ async function _musicSongUrlImpl(playSource, songId, platform, song, quality = '
         let url = null;
         const isBg = AppState.currentState === 'background';
 
-        // 策略1：如果是网易云（无论前台或后台），优先直接走 nativeLxMusicUrl（原生 OkHttp 极速通道，600~900ms 极速出链，免除前台等待沙箱 3.5 秒超时）
+// 智能竞速辅助函数：多个解析 Promise 并发，先返回有效 http 链接者直接胜出
+function raceFirstValidUrl(promiseFactories) {
+  return new Promise((resolve) => {
+    let pending = promiseFactories.length;
+    let resolved = false;
+
+    if (pending === 0) {
+      resolve(null);
+      return;
+    }
+
+    promiseFactories.forEach((factory) => {
+      Promise.resolve()
+        .then(() => factory())
+        .then((url) => {
+          if (resolved) return;
+          if (url && typeof url === 'string' && url.startsWith('http')) {
+            resolved = true;
+            resolve(url);
+          } else {
+            pending--;
+            if (pending === 0 && !resolved) {
+              resolve(null);
+            }
+          }
+        })
+        .catch(() => {
+          if (resolved) return;
+          pending--;
+          if (pending === 0 && !resolved) {
+            resolve(null);
+          }
+        });
+    });
+  });
+}
+
+        // 策略1：网易云原生 API 与 WebView 沙箱智能竞速 / 并行调度
         if (platform === 'netease') {
-          _log('LX: netease detected, try nativeLxMusicUrl first');
-          url = await nativeLxMusicUrl(songId, platform, quality);
-          _log(`LX: nativeLxMusicUrl done: ${url ? 'has url' : 'null'}`);
+          if (isSandboxReady()) {
+            _log('LX: netease detected, race nativeLxMusicUrl and WebView sandbox concurrently');
+            url = await raceFirstValidUrl([
+              () => nativeLxMusicUrl(songId, platform, quality),
+              () => withTimeout(
+                getLxMusicUrlWebView(sourceId, songId, '128k', platform, song),
+                4000,
+                'WebViewSandbox'
+              ),
+            ]);
+            _log(`LX: netease race result: ${url ? 'has url' : 'null'}`);
+          } else {
+            _log('LX: netease detected, sandbox not ready, try nativeLxMusicUrl');
+            url = await nativeLxMusicUrl(songId, platform, quality);
+            _log(`LX: nativeLxMusicUrl done: ${url ? 'has url' : 'null'}`);
+          }
         }
 
-        // 策略2：若尚未获得 URL（如 QQ/酷狗/酷我平台，或网易原生接口波动），且沙箱已就绪，调用 WebView 沙箱解析（超时 3500ms）
-        if ((!url || typeof url !== 'string' || !url.startsWith('http')) && isSandboxReady()) {
+        // 策略2：非网易云（如 QQ/酷狗/酷我），或网易竞速后仍未获得 URL，沙箱已就绪则走沙箱
+        if ((!url || typeof url !== 'string' || !url.startsWith('http')) && isSandboxReady() && platform !== 'netease') {
           _log('LX: sandbox ready, getLxMusicUrlWebView start');
           try {
             url = await withTimeout(
               getLxMusicUrlWebView(sourceId, songId, '128k', platform, song),
-              3500,
+              4000,
               'WebViewSandbox'
             );
             _log(`LX: getLxMusicUrlWebView done: ${url ? 'has url' : 'null'}`);
@@ -1895,8 +1965,8 @@ async function resolvePlayableUrlCascade(song, currentPlaySource = 'official', q
     if (songId) {
       try {
         const isLx = currentPlaySource.startsWith('lx:');
-        // 自定义音源外层超时设为 7500ms（给予沙箱 3500ms + 原生备用 2500ms 充足容错，绝不提前误掐断），官方源给 4000ms
-        const timeoutMs = isLx ? 7500 : 4000;
+        // 自定义音源外层超时放宽至 10000ms（给予网络波动重试 + 沙箱竞速充足容错，绝不提前误掐断），官方源给 4000ms
+        const timeoutMs = isLx ? 10000 : 4000;
         logger.info('SourceManager', `Cascade Tier 1: Trying primary source [${currentPlaySource}] with timeout ${timeoutMs}ms`);
         const primaryRes = await withTimeout(
           _musicSongUrlImpl(currentPlaySource, songId, platform, song, quality),
