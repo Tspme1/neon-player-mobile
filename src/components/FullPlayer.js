@@ -12,28 +12,31 @@ import {
   VolumeOnIcon, VolumeMuteIcon, ListIcon, MoreIcon, DownloadIcon,
   ClockIcon, ShareIcon, FolderIcon, MusicIcon, CheckIcon
 } from './icons';
-import { usePlayerStore, usePlaybackProgress } from '../store/useStore';
+import { usePlayerStore, usePlaybackProgress, useLyricsStore } from '../store/useStore';
 import { isFavorited as checkFavorited, toggleFavorite as toggleFav, loadSettings } from '../core/storage';
 import { formatTime } from '../utils/format';
 import { musicSongUrl } from '../core/source-manager';
+import { downloadTrackUseCase } from '../core/usecases/download-service';
 import { getCurrentVersionName } from '../core/updater';
 
 const { height: SCREEN_HEIGHT, width: SCREEN_WIDTH } = Dimensions.get('window');
 const COVER_SIZE = Math.min(SCREEN_WIDTH * 0.5, SCREEN_HEIGHT * 0.28);
 const EMPTY_PROGRESS = { position: 0, duration: 0 };
+const EMPTY_LYRICS = { lyricsData: [], currentLyricIndex: -1 };
 
 export default function FullPlayer({ visible, onClose, onQueuePress }) {
   const { colors } = useTheme();
 
-  // 仅在全屏播放器打开可见时才订阅高频播放进度；隐藏时完全静默（零重渲染）
+  // 仅在全屏播放器打开可见时才订阅高频播放进度与歌词高亮；隐藏时完全静默（零重渲染）
   const { position, duration } = usePlaybackProgress(s => visible ? s : EMPTY_PROGRESS);
+  const { lyricsData, currentLyricIndex } = useLyricsStore(s => visible ? s : EMPTY_LYRICS);
 
   const store = usePlayerStore();
   const lyricsScrollRef = useRef(null);
   const [scrollAreaHeight, setScrollAreaHeight] = useState(0);
   const {
     playlist, currentIndex, isPlaying, playMode, isRoaming,
-    roamIndex, roamPlaylist, favorites, lyricsData, currentLyricIndex,
+    roamIndex, roamPlaylist, favorites,
     volume, isMuted, currentCoverUrl
   } = store;
 
@@ -295,24 +298,7 @@ export default function FullPlayer({ visible, onClose, onQueuePress }) {
   const handleDownload = async () => {
     hideMenuWithAnim();
     if (!track) return;
-    setToast('正在获取下载链接...');
-    try {
-      const songId = track.songId || track.id;
-      if (!songId) { setToast('无法获取歌曲ID'); return; }
-      const store = usePlayerStore.getState();
-      const source = track._src || track._platform || store.currentSource || 'netease';
-      const platform = track._platform || (source.startsWith('lx:') ? 'netease' : source);
-      const settings = await loadSettings();
-      const playSource = settings.playSource || 'official';
-      const urlData = await musicSongUrl(playSource, { ...track, songId, _platform: platform }, track);
-      if (!urlData || !urlData.url) { setToast('无法获取下载链接'); return; }
-      setToast('正在下载到 Download/NeonPlayer...');
-      const fileName = (track.name || 'unknown') + ' - ' + (track.artist || '') + '.mp3';
-      await NativeModules.UpdaterModule.downloadToMusicDir(urlData.url, fileName);
-      setToast('「' + track.name + '」已下载到 Download/NeonPlayer');
-    } catch (e) {
-      setToast('下载失败: ' + (e.message || ''));
-    }
+    await downloadTrackUseCase(track, { showToast: setToast });
   };
 
   const handleOpenDownloadDir = async () => {

@@ -8,7 +8,9 @@ import { HEADER_PADDING_TOP } from '../theme/safearea';
 import { useTheme } from '../theme/useTheme';
 import { usePlayerStore } from '../store/useStore';
 import { neteaseToplist, neteaseToplistDetail, neteaseShuffleSongs, neteaseSearch, musicSongUrl } from '../core/source-manager';
+import { downloadTrackUseCase } from '../core/usecases/download-service';
 import { isFavorited, toggleFavorite } from '../core/storage';
+import { TRACK_LIST_PERF_PROPS } from '../utils/list-perf';
 import { downloadAndCache } from '../core/cache-manager';
 import TrackItem from '../components/TrackItem';
 import Spinner from '../components/Spinner';
@@ -103,48 +105,23 @@ export default function DiscoverScreen() {
   };
 
   const handleFav = (song) => {
+    const curFavs = usePlayerStore.getState().favorites;
     const track = { ...song, type: 'online', songId: song.id };
-    const newFavs = toggleFavorite(track, [...favorites]);
+    const newFavs = toggleFavorite(track, [...curFavs]);
     setFavorites(newFavs);
-    setToast(isFavorited(track, favorites) ? '已从我喜欢移除' : '已加入我喜欢');
+    setToast(isFavorited(track, newFavs) ? '已加入我喜欢' : '已从我喜欢移除');
   };
 
   const handleDownload = async (song) => {
-    if (!song) { setMenuVisible(false); return; }
-    setToast('正在获取下载链接...');
-    try {
-      const songId = song.id || song.songId;
-      if (!songId) { setToast('无法获取歌曲ID'); setMenuVisible(false); return; }
-      const source = usePlayerStore.getState().currentSource || 'netease';
-      const urlData = await musicSongUrl(source, songId, song);
-      if (!urlData || !urlData.url) {
-        setToast('无法获取下载链接');
-        setMenuVisible(false);
-        return;
-      }
-      setToast('正在下载到 Download/NeonPlayer...');
-      const { NativeModules } = require('react-native');
-      const fileName = `${song.name || 'unknown'} - ${song.artist || ''}.mp3`.trim();
-      await NativeModules.UpdaterModule.downloadToMusicDir(urlData.url, fileName);
-      setToast(`「${song.name}」已下载到 Download/NeonPlayer`);
-    } catch (e) {
-      setToast('下载失败: ' + (e.message || ''));
-    }
     setMenuVisible(false);
+    if (!song) return;
+    await downloadTrackUseCase(song, { showToast: setToast });
   };
 
-  const handlePlayNext = (song, index) => {
-    const track = { ...song, type: 'online', songId: song.id };
-    const { playlist, currentIndex } = usePlayerStore.getState();
-    const newPlaylist = [...playlist];
-    const insertAt = currentIndex + 1;
-    if (!newPlaylist.some(t => t.songId === song.id)) {
-      newPlaylist.splice(insertAt, 0, track);
-      usePlayerStore.setState({ playlist: newPlaylist });
-      setToast('已添加到下一首播放');
-    } else {
-      setToast('该歌曲已在播放列表中');
-    }
+  const handlePlayNext = (song) => {
+    const track = { ...song, type: 'online', songId: song.id || song.songId };
+    usePlayerStore.getState().insertNextInQueue(track);
+    setToast('已添加到下一首播放');
     setMenuVisible(false);
   };
 
@@ -238,6 +215,7 @@ export default function DiscoverScreen() {
           }}
           keyExtractor={(item, index) => `${item.id}_${index}`}
           contentContainerStyle={{ paddingBottom: 80 }}
+          {...TRACK_LIST_PERF_PROPS}
         />
       </View>
     );

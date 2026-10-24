@@ -6,6 +6,8 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { NativeModules, AppState } from 'react-native';
 import logger from './logger';
 import { EVENTS, emit, on } from './event-bus';
+import { normalizeTrack, isSameTrack } from './models/track';
+import { createAudioSound, isMedia3Supported, setMedia3MixWithOthers } from './audio/media3-sound';
 import {
   detectPlatform,
   musicSongUrl,
@@ -93,6 +95,7 @@ let allowMixWithOthers = false;
 
 export function setAllowMixWithOthers(value) {
   allowMixWithOthers = value;
+  setMedia3MixWithOthers(value);
   setupAudio();
   // Notify native layer to skip audio focus acquisition
   try {
@@ -280,7 +283,6 @@ function setupPlaybackStatusUpdate() {
                   if (cachedPath && soundObject) {
                     logger.info('PlayerEngine', `repeat-one: hot handover to local cache: ${cachedPath}`);
                     isCurrentFileCached = true;
-                    playUri = cachedPath;
                     const oldSound = soundObject;
                     const { sound: newSound } = await Audio.Sound.createAsync(
                       { uri: normalizeAudioUri(cachedPath) },
@@ -399,19 +401,105 @@ export function getIsMuted() {
 
 export function setQueue(source, sourceArray, startIndex = 0) {
   queueSource = source;
-  playlist = sourceArray.map(t => ({ ...t }));
+  playlist = sourceArray.map(t => normalizeTrack(t));
   currentIndex = startIndex;
-  emit(EVENTS.PLAYBACK_QUEUE_CHANGE, { playlist, currentIndex, queueSource: source });
+  if (isRoaming || source === 'roam') {
+    roamPlaylist = [...playlist];
+    roamIndex = currentIndex;
+  }
+  emit(EVENTS.PLAYBACK_QUEUE_CHANGE, { playlist: [...playlist], currentIndex, queueSource: source });
 }
 
 export function appendToQueue(source, tracks) {
-  for (const track of tracks) {
-    if (!playlist.some(t => (t.songId && t.songId === track.songId) || t.path === track.path)) {
-      playlist.push({ ...track });
+  for (const rawTrack of tracks) {
+    const track = normalizeTrack(rawTrack);
+    if (!playlist.some(t => isSameTrack(t, track))) {
+      playlist.push(track);
     }
   }
   if (!queueSource) queueSource = source;
-  emit(EVENTS.PLAYBACK_QUEUE_CHANGE, { playlist, currentIndex, queueSource });
+  if (isRoaming) roamPlaylist = [...playlist];
+  emit(EVENTS.PLAYBACK_QUEUE_CHANGE, { playlist: [...playlist], currentIndex, queueSource });
+}
+
+/**
+ * 插入到"下一首播放"并同步引擎内部队列状态（解决以往 UI 直接改 Store 导致引擎与 Store 状态撕裂的 Bug）
+ */
+export function insertNextInQueue(rawTrack) {
+  if (!rawTrack) return { insertedIndex: -1, autoStarted: false };
+  const track = normalizeTrack(rawTrack);
+
+  // 若当前队列为空，直接加入并开始播放
+  if (playlist.length === 0) {
+    queueSource = queueSource || (track.type === 'local' ? 'local' : 'online');
+    playlist = [track];
+    currentIndex = 0;
+    if (isRoaming) {
+      roamPlaylist = [...playlist];
+      roamIndex = 0;
+    }
+    emit(EVENTS.PLAYBACK_QUEUE_CHANGE, { playlist: [...playlist], currentIndex, queueSource });
+    playTrack(0);
+    return { insertedIndex: 0, autoStarted: true };
+  }
+
+  // 检查队列中是否已存在该曲目
+  const existingIdx = playlist.findIndex(t => isSameTrack(t, track));
+  if (existingIdx !== -1) {
+    if (existingIdx === currentIndex) {
+      // 已经在播放当前曲目，无需移动
+      return { insertedIndex: currentIndex, autoStarted: false };
+    }
+    playlist.splice(existingIdx, 1);
+    if (existingIdx < currentIndex) {
+      currentIndex = Math.max(0, currentIndex - 1);
+      if (isRoaming) roamIndex = currentIndex;
+    }
+  }
+
+  const insertIdx = Math.min(Math.max(0, currentIndex + 1), playlist.length);
+  playlist.splice(insertIdx, 0, track);
+  if (isRoaming) roamPlaylist = [...playlist];
+
+  emit(EVENTS.PLAYBACK_QUEUE_CHANGE, { playlist: [...playlist], currentIndex, queueSource });
+  schedulePreloadNextTrack();
+  return { insertedIndex: insertIdx, autoStarted: false };
+}
+
+/**
+ * 从当前播放队列移除指定索引的曲目并同步引擎内部队列状态
+ */
+export function removeFromQueue(index) {
+  if (index < 0 || index >= playlist.length) return;
+  const wasCurrent = index === currentIndex;
+  playlist.splice(index, 1);
+
+  if (playlist.length === 0) {
+    currentIndex = -1;
+    roamIndex = -1;
+    isPlaying = false;
+    queueSource = null;
+    unloadSound();
+    emit(EVENTS.PLAYBACK_QUEUE_CHANGE, { playlist: [], currentIndex: -1, queueSource: null });
+    emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position: 0, duration: 0 });
+    return;
+  }
+
+  if (index < currentIndex) {
+    currentIndex -= 1;
+    if (isRoaming) roamIndex = currentIndex;
+  } else if (wasCurrent) {
+    if (currentIndex >= playlist.length) currentIndex = 0;
+    if (isRoaming) roamIndex = currentIndex;
+    if (isRoaming) roamPlaylist = [...playlist];
+    emit(EVENTS.PLAYBACK_QUEUE_CHANGE, { playlist: [...playlist], currentIndex, queueSource });
+    playTrack(currentIndex);
+    return;
+  }
+
+  if (isRoaming) roamPlaylist = [...playlist];
+  emit(EVENTS.PLAYBACK_QUEUE_CHANGE, { playlist: [...playlist], currentIndex, queueSource });
+  schedulePreloadNextTrack();
 }
 
 export function getPlaylist() {
@@ -704,7 +792,7 @@ export async function playTrack(index) {
       emit(EVENTS.PLAYBACK_STATE_CHANGE, { isPlaying: false, position: 0, duration: 0 });
       return;
     }
-    const newSound = new Audio.Sound();
+    const newSound = createAudioSound();
     soundObject = newSound;
     await newSound.loadAsync(
       { uri: normalizeAudioUri(playUri) },
@@ -843,7 +931,7 @@ export async function playOnlineSong(song, queueIndex = -1) {
 
     if (!songUrlData || !songUrlData.url) {
       const fee = song.fee || 0;
-      showToast(fee === 1 || fee === 8 ? '此歌曲为 VIP 专享，所有音源均无法播放' : '当前音源及备用音源均无法播放此歌曲');
+      showToast(fee === 1 || fee === 4 ? '此歌曲为 VIP 专享，所有音源均无法播放' : '当前音源及备用音源均无法播放此歌曲');
       _dbgLog('ABORT: all sources cascade failed');
       isPlaying = false;
       emit(EVENTS.PLAYBACK_TRACK_CHANGE, { track: song, index: targetIndex, isPlaying: false, isRoaming: isRoaming || queueSource === 'roam' });
@@ -860,7 +948,7 @@ export async function playOnlineSong(song, queueIndex = -1) {
     if (sessionId !== currentPlaySessionId) return;
 
     let newSound = null;
-    newSound = new Audio.Sound();
+    newSound = createAudioSound();
     soundObject = newSound;
 
     // 优先使用文件缓存（复用前面已查过的 cachedFilePath，避免重复 I/O）
@@ -873,12 +961,12 @@ export async function playOnlineSong(song, queueIndex = -1) {
       isCurrentFileCached = true;
     }
 
-    // 前后台差异化策略：前台流式播放（快），后台先下载再播放（稳）
+    // 前后台差异化策略：Media3 原生引擎支持 WAKE_MODE_NETWORK 与 OkHttpDataSource，前后台均可毫秒级直接流式起播
     const isBackground = AppState.currentState === 'background';
-    _dbgLog(`AppState: ${isBackground ? 'background' : 'active'}, playUri: ${playUri === songUrlData.url ? 'remote' : 'local'}`);
+    _dbgLog(`AppState: ${isBackground ? 'background' : 'active'}, engine: ${isMedia3Supported() ? 'Media3' : 'expo-av'}, playUri: ${playUri === songUrlData.url ? 'remote' : 'local'}`);
     if (!songUrlData.isLocal && !isCurrentFileCached) {
-      if (isBackground) {
-        // 后台：先下载到本地再播放（避免 expo-av 后台加载远程 URL 失败）
+      if (isBackground && !isMedia3Supported()) {
+        // 仅当回退至旧版 expo-av 且处于后台时：先下载到本地再播放
         _dbgLog('BG: downloadAndCache start');
         try {
           const downloadedPath = await downloadAndCache(platform, songId, songUrlData.url);
@@ -891,8 +979,7 @@ export async function playOnlineSong(song, queueIndex = -1) {
           _dbgLog(`BG: downloadAndCache error: ${e.message}`);
         }
       } else {
-        // 前台：直接用远程 URL 流式播放（ExoPlayer 缓冲快，几百毫秒出声）
-        // 异步下载缓存，不影响当前播放速度，下次播放同一首歌走本地文件
+        // Media3 原生流式起播（800ms 极速缓冲出声），同时后台静默落盘缓存供下次 0ms 播放
         downloadAndCache(platform, songId, songUrlData.url).then((cachedPath) => {
           if (cachedPath && currentOnlineSong && currentOnlineSong.id === songId) {
             isCurrentFileCached = true;
@@ -943,7 +1030,7 @@ export async function playOnlineSong(song, queueIndex = -1) {
         isCurrentFileCached = false;
         await deleteCachedFile(platform, songId);
         await newSound.unloadAsync();
-        newSound = new Audio.Sound();
+        newSound = createAudioSound();
         soundObject = newSound;
 
         let remoteUrl = songUrlData.url;
@@ -1354,6 +1441,8 @@ export default {
   toggleMute,
   setQueue,
   appendToQueue,
+  insertNextInQueue,
+  removeFromQueue,
   togglePlay,
   playTrack,
   playOnlineSong,

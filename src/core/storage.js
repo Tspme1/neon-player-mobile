@@ -1,6 +1,8 @@
-// 统一存储服务 — 合并 favorites.js + cache.js
-// 封装 AsyncStorage，提供收藏/播放列表/设置/音量/URL缓存 持久化
+// 统一高速存储引擎 (L1 内存缓存 + L2 原生 NeonKV 同步引擎 + L3 AsyncStorage 自动平滑迁移)
+// 同时内置 WeakMap O(1) 收藏/歌单哈希索引，彻底消除长列表渲染时的 O(N*M) 线性扫描开销
+import { NativeModules } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { normalizeTrack } from './models/track';
 
 // === 存储键名 ===
 export const KEYS = {
@@ -15,14 +17,124 @@ export const KEYS = {
   ROAM_PREFS: '@roam_prefs',
 };
 
-// === URL 缓存 TTL ===
-const URL_CACHE_TTL = 20 * 60 * 1000; // 20 minutes
+// =====================================================================
+// 底层 NeonKV + AsyncStorage 混合引擎（零丢失自动迁移 + 0ms 同步读取）
+// =====================================================================
 
-// === URL 内存缓存（定期批量持久化） ===
-const urlCacheMap = new Map();
-let urlCacheDirty = false;
-let urlCacheFlushTimer = null;
-const URL_CACHE_FLUSH_INTERVAL = 30 * 1000; // 30秒批量持久化一次
+const memoryKV = new Map();
+const asyncMirrorTimers = new Map();
+
+function hasNativeKV() {
+  return !!(NativeModules.MediaModule && typeof NativeModules.MediaModule.kvGetString === 'function');
+}
+
+/**
+ * 同步读取键值（优先 L1 内存 -> L2 原生同步 NeonKV）
+ */
+export function kvGetSync(key) {
+  if (memoryKV.has(key)) {
+    return memoryKV.get(key);
+  }
+  if (hasNativeKV()) {
+    try {
+      const val = NativeModules.MediaModule.kvGetString(key);
+      if (val !== null && val !== undefined) {
+        memoryKV.set(key, val);
+        return val;
+      }
+    } catch {}
+  }
+  return null;
+}
+
+/**
+ * 异步读取键值（支持首次从旧版 AsyncStorage 无感自动迁移至 NeonKV）
+ */
+export async function kvGetAsync(key) {
+  const syncVal = kvGetSync(key);
+  if (syncVal !== null && syncVal !== undefined) {
+    return syncVal;
+  }
+  try {
+    const legacyVal = await AsyncStorage.getItem(key);
+    if (legacyVal !== null && legacyVal !== undefined) {
+      memoryKV.set(key, legacyVal);
+      if (hasNativeKV()) {
+        try { NativeModules.MediaModule.kvSetString(key, legacyVal); } catch {}
+      }
+      return legacyVal;
+    }
+  } catch {}
+  return null;
+}
+
+/**
+ * 写入键值（L1 内存立即生效 + L2 原生异步 apply + L3 AsyncStorage 防抖双写备份）
+ */
+export async function kvSetAsync(key, valueStr) {
+  const str = String(valueStr ?? '');
+  memoryKV.set(key, str);
+  if (hasNativeKV()) {
+    try {
+      NativeModules.MediaModule.kvSetString(key, str);
+    } catch {}
+  }
+  // 防抖写入 AsyncStorage 作为双保险备份（避免高频序列化阻塞 Bridge）
+  if (asyncMirrorTimers.has(key)) {
+    clearTimeout(asyncMirrorTimers.get(key));
+  }
+  const timer = setTimeout(() => {
+    asyncMirrorTimers.delete(key);
+    AsyncStorage.setItem(key, str).catch(() => {});
+  }, 200);
+  asyncMirrorTimers.set(key, timer);
+}
+
+/**
+ * 删除键值
+ */
+export async function kvRemoveAsync(key) {
+  memoryKV.delete(key);
+  if (asyncMirrorTimers.has(key)) {
+    clearTimeout(asyncMirrorTimers.get(key));
+    asyncMirrorTimers.delete(key);
+  }
+  if (hasNativeKV()) {
+    try { NativeModules.MediaModule.kvRemove(key); } catch {}
+  }
+  try {
+    await AsyncStorage.removeItem(key);
+  } catch {}
+}
+
+// =====================================================================
+// O(1) 哈希索引加速引擎（WeakMap 绑定数组引用，列表渲染性能提升数十倍）
+// =====================================================================
+
+const favSetCache = new WeakMap();
+
+function getFavoriteLookupSet(favorites) {
+  if (!Array.isArray(favorites) || favorites.length === 0) return null;
+  let set = favSetCache.get(favorites);
+  if (!set) {
+    set = new Set();
+    for (let i = 0; i < favorites.length; i++) {
+      const f = favorites[i];
+      if (!f) continue;
+      if (f.id) set.add(`id:${f.id}`);
+      if (f.type === 'online' && f.songId) set.add(`song:${f.songId}`);
+      if (f.type !== 'online' && f.path) set.add(`path:${f.path}`);
+    }
+    favSetCache.set(favorites, set);
+  }
+  return set;
+}
+
+function invalidateFavoriteLookup(favorites) {
+  if (favorites && typeof favorites === 'object') {
+    favSetCache.delete(favorites);
+  }
+}
 
 // =====================================================================
 // Favorites 收藏
@@ -30,7 +142,7 @@ const URL_CACHE_FLUSH_INTERVAL = 30 * 1000; // 30秒批量持久化一次
 
 export async function loadFavorites() {
   try {
-    const json = await AsyncStorage.getItem(KEYS.FAVORITES);
+    const json = await kvGetAsync(KEYS.FAVORITES);
     return json ? JSON.parse(json) : [];
   } catch {
     return [];
@@ -38,16 +150,16 @@ export async function loadFavorites() {
 }
 
 export async function saveFavorites(favorites) {
+  invalidateFavoriteLookup(favorites);
   try {
-    await AsyncStorage.setItem(KEYS.FAVORITES, JSON.stringify(favorites));
+    await kvSetAsync(KEYS.FAVORITES, JSON.stringify(favorites));
   } catch (e) {
     console.error('[Storage] saveFavorites error:', e);
   }
 }
 
-// === Favorite ID 逻辑 (从桌面端 favorites.js 移植) ===
-
 export function getFavoriteId(track) {
+  if (!track) return '';
   if (track.type === 'online' || track.songId) {
     return 'online_' + (track.songId || track.id || '');
   }
@@ -55,15 +167,24 @@ export function getFavoriteId(track) {
 }
 
 export function isFavorited(track, favorites) {
+  if (!track || !Array.isArray(favorites) || favorites.length === 0) return false;
+  const set = getFavoriteLookupSet(favorites);
+  if (!set) return false;
+
   const id = getFavoriteId(track);
+  if (id && set.has(`id:${id}`)) return true;
+
   const songId = track.songId || track.id;
-  if (songId) {
-    return favorites.some(f => f.id === id || (f.type === 'online' && f.songId === songId));
-  }
-  return favorites.some(f => f.id === id || (f.type !== 'online' && f.path === track.path));
+  if (songId && set.has(`song:${songId}`)) return true;
+
+  if (track.path && set.has(`path:${track.path}`)) return true;
+  return false;
 }
 
 export function toggleFavorite(track, favorites) {
+  if (!track || !Array.isArray(favorites)) return favorites || [];
+  invalidateFavoriteLookup(favorites);
+
   const id = getFavoriteId(track);
   const songId = track.songId || track.id;
   let idx = favorites.findIndex(f => f.id === id);
@@ -75,23 +196,26 @@ export function toggleFavorite(track, favorites) {
   if (idx >= 0) {
     favorites.splice(idx, 1);
   } else {
+    const normalized = normalizeTrack(track);
     favorites.push({
       id: id,
-      type: track.type || (track.path && (!track.songId || String(track.songId).startsWith('local_')) ? 'local' : 'online'),
-      path: track.path || '',
-      name: track.name || '',
-      songId: track.songId || track.id || null,
-      artist: track.artist || '',
-      album: track.album || '',
-      duration: track.duration || 0,
-      fee: track.fee || 0,
-      _src: track._src || null,
-      _platform: track._platform || track._src || undefined,
-      picUrl: track.picUrl || track.pic || track.coverUrl || track.cover || '',
-      pic: track.pic || track.picUrl || track.coverUrl || track.cover || '',
+      type: normalized.type,
+      path: normalized.path || '',
+      name: normalized.name || '',
+      title: normalized.name || '',
+      songId: normalized.songId || null,
+      artist: normalized.artist || '',
+      album: normalized.album || '',
+      duration: normalized.duration || 0,
+      fee: normalized.fee || 0,
+      _src: normalized._src || null,
+      _platform: normalized._platform || undefined,
+      picUrl: normalized.picUrl || '',
+      pic: normalized.picUrl || '',
       favoritedAt: Date.now(),
     });
   }
+  invalidateFavoriteLookup(favorites);
   return favorites;
 }
 
@@ -101,7 +225,7 @@ export function toggleFavorite(track, favorites) {
 
 export async function loadPlaylist() {
   try {
-    const json = await AsyncStorage.getItem(KEYS.PLAYLIST);
+    const json = await kvGetAsync(KEYS.PLAYLIST);
     return json ? JSON.parse(json) : [];
   } catch {
     return [];
@@ -110,52 +234,82 @@ export async function loadPlaylist() {
 
 export async function savePlaylist(playlist) {
   try {
-    await AsyncStorage.setItem(KEYS.PLAYLIST, JSON.stringify(playlist));
+    await kvSetAsync(KEYS.PLAYLIST, JSON.stringify(playlist));
   } catch (e) {
     console.error('[Storage] savePlaylist error:', e);
   }
 }
 
 // =====================================================================
-// Settings 设置
+// Settings 设置（支持 0ms 同步读取 getSettingsSync，彻底解耦循环依赖）
 // =====================================================================
 
+const DEFAULT_SETTINGS = {
+  currentSource: 'netease',
+  searchSource: 'netease',
+  playSource: 'official',
+  themeMode: 'auto',
+  musicQuality: 'standard',
+  playMode: 'sequence',
+  allowMixWithOthers: false,
+  enableCrossPlatformFailover: true,
+};
+
 let memoryCachedSettings = null;
+
+function normalizeSettingsObject(raw = {}) {
+  const settings = { ...raw };
+  if (!settings.searchSource && settings.currentSource) {
+    if (settings.currentSource.startsWith('lx:')) {
+      settings.searchSource = 'netease';
+      settings.playSource = settings.currentSource;
+    } else {
+      settings.searchSource = settings.currentSource;
+      settings.playSource = 'official';
+    }
+  }
+  if (!settings.searchSource) settings.searchSource = 'netease';
+  if (!settings.playSource) settings.playSource = 'official';
+  if (!settings.currentSource) settings.currentSource = settings.playSource !== 'official' ? settings.playSource : settings.searchSource;
+  if (!settings.themeMode) settings.themeMode = 'auto';
+  if (!settings.musicQuality) settings.musicQuality = 'standard';
+  if (!settings.playMode) settings.playMode = 'sequence';
+  if (settings.allowMixWithOthers === undefined) settings.allowMixWithOthers = false;
+  if (settings.enableCrossPlatformFailover === undefined) settings.enableCrossPlatformFailover = true;
+  return settings;
+}
+
+/**
+ * 同步获取当前设置（0ms 立即返回，供核心引擎与级联解析器直接调用，无需动态 import Store）
+ */
+export function getSettingsSync() {
+  if (memoryCachedSettings) return { ...memoryCachedSettings };
+  const syncJson = kvGetSync(KEYS.SETTINGS);
+  if (syncJson) {
+    try {
+      memoryCachedSettings = normalizeSettingsObject(JSON.parse(syncJson));
+      return { ...memoryCachedSettings };
+    } catch {}
+  }
+  return { ...DEFAULT_SETTINGS };
+}
 
 export async function loadSettings() {
   if (memoryCachedSettings) return { ...memoryCachedSettings };
   try {
-    const json = await AsyncStorage.getItem(KEYS.SETTINGS);
-    const settings = json ? JSON.parse(json) : {};
-    // 向后兼容：旧版只有 currentSource，迁移为双轴
-    if (!settings.searchSource && settings.currentSource) {
-      // currentSource 可能是 'netease'/'tencent' 等内置音源或 'lx:xxx'
-      if (settings.currentSource.startsWith('lx:')) {
-        settings.searchSource = 'netease';
-        settings.playSource = settings.currentSource;
-      } else {
-        settings.searchSource = settings.currentSource;
-        settings.playSource = 'official';
-      }
-    }
-    if (!settings.searchSource) settings.searchSource = 'netease';
-    if (!settings.playSource) settings.playSource = 'official';
-    if (!settings.themeMode) settings.themeMode = 'auto';
-    if (!settings.musicQuality) settings.musicQuality = 'standard';
-    if (!settings.playMode) settings.playMode = 'sequence';
-    if (settings.allowMixWithOthers === undefined) settings.allowMixWithOthers = false;
-    if (settings.enableCrossPlatformFailover === undefined) settings.enableCrossPlatformFailover = true;
-    memoryCachedSettings = settings;
-    return { ...settings };
+    const json = await kvGetAsync(KEYS.SETTINGS);
+    const raw = json ? JSON.parse(json) : {};
+    memoryCachedSettings = normalizeSettingsObject(raw);
+    return { ...memoryCachedSettings };
   } catch {
-    return { currentSource: 'netease', searchSource: 'netease', playSource: 'official', themeMode: 'auto', musicQuality: 'standard', playMode: 'sequence', allowMixWithOthers: false, enableCrossPlatformFailover: true };
+    return { ...DEFAULT_SETTINGS };
   }
 }
 
 export async function saveSettings(settings) {
-  memoryCachedSettings = { ...settings };
+  memoryCachedSettings = normalizeSettingsObject(settings);
   try {
-    await AsyncStorage.setItem(KEYS.SETTINGS, JSON.stringify(settings));
+    await kvSetAsync(KEYS.SETTINGS, JSON.stringify(memoryCachedSettings));
   } catch (e) {
     console.error('[Storage] saveSettings error:', e);
   }
@@ -167,7 +321,7 @@ export async function saveSettings(settings) {
 
 export async function loadVolume() {
   try {
-    const vol = await AsyncStorage.getItem(KEYS.VOLUME);
+    const vol = await kvGetAsync(KEYS.VOLUME);
     return vol !== null ? Math.max(0, Math.min(1, parseFloat(vol))) : 0.8;
   } catch {
     return 0.8;
@@ -176,8 +330,8 @@ export async function loadVolume() {
 
 export async function saveVolume(volume) {
   try {
-    await AsyncStorage.setItem(KEYS.VOLUME, String(volume));
-  } catch (e) {
+    await kvSetAsync(KEYS.VOLUME, String(volume));
+  } catch {
     // silent fail
   }
 }
@@ -186,9 +340,12 @@ export async function saveVolume(volume) {
 // URL 缓存（内存 Map + 定期批量持久化）
 // =====================================================================
 
-/**
- * 从内存缓存获取 URL
- */
+const URL_CACHE_TTL = 20 * 60 * 1000; // 20 minutes
+const urlCacheMap = new Map();
+let urlCacheDirty = false;
+let urlCacheFlushTimer = null;
+const URL_CACHE_FLUSH_INTERVAL = 30 * 1000;
+
 export function getCachedUrl(key) {
   const cached = urlCacheMap.get(key);
   if (cached && (Date.now() - cached.timestamp) < URL_CACHE_TTL) {
@@ -197,18 +354,12 @@ export function getCachedUrl(key) {
   return null;
 }
 
-/**
- * 写入 URL 到内存缓存，标记为脏数据等待批量持久化
- */
 export function setCachedUrl(key, data) {
   urlCacheMap.set(key, { data, timestamp: Date.now() });
   urlCacheDirty = true;
   scheduleUrlCacheFlush();
 }
 
-/**
- * 清除 URL 缓存
- */
 export function clearUrlCache() {
   urlCacheMap.clear();
   urlCacheDirty = false;
@@ -216,35 +367,26 @@ export function clearUrlCache() {
     clearTimeout(urlCacheFlushTimer);
     urlCacheFlushTimer = null;
   }
-  // 异步清除持久化数据
-  AsyncStorage.removeItem(KEYS.URL_CACHE).catch(() => {});
+  kvRemoveAsync(KEYS.URL_CACHE).catch(() => {});
 }
 
-/**
- * 从 AsyncStorage 恢复 URL 缓存到内存（启动时调用）
- */
 export async function restoreUrlCache() {
   try {
-    const json = await AsyncStorage.getItem(KEYS.URL_CACHE);
+    const json = await kvGetAsync(KEYS.URL_CACHE);
     if (json) {
       const persisted = JSON.parse(json);
       const now = Date.now();
       for (const [key, entry] of Object.entries(persisted)) {
-        // 只恢复未过期的条目
         if (now - entry.timestamp < URL_CACHE_TTL) {
           urlCacheMap.set(key, entry);
         }
       }
-      console.log(`[Storage] Restored ${urlCacheMap.size} URL cache entries`);
     }
   } catch {
     // silent fail
   }
 }
 
-/**
- * 调度 URL 缓存批量持久化（防抖）
- */
 function scheduleUrlCacheFlush() {
   if (urlCacheFlushTimer) return;
   urlCacheFlushTimer = setTimeout(() => {
@@ -252,9 +394,6 @@ function scheduleUrlCacheFlush() {
   }, URL_CACHE_FLUSH_INTERVAL);
 }
 
-/**
- * 将脏的 URL 缓存批量写入 AsyncStorage
- */
 async function flushUrlCache() {
   urlCacheFlushTimer = null;
   if (!urlCacheDirty) return;
@@ -264,9 +403,9 @@ async function flushUrlCache() {
     for (const [key, entry] of urlCacheMap) {
       obj[key] = entry;
     }
-    await AsyncStorage.setItem(KEYS.URL_CACHE, JSON.stringify(obj));
-  } catch (e) {
-    // silent fail — 内存缓存仍然有效
+    await kvSetAsync(KEYS.URL_CACHE, JSON.stringify(obj));
+  } catch {
+    // silent fail
   }
 }
 
@@ -276,7 +415,7 @@ async function flushUrlCache() {
 
 export async function loadRoamPrefs() {
   try {
-    const json = await AsyncStorage.getItem(KEYS.ROAM_PREFS);
+    const json = await kvGetAsync(KEYS.ROAM_PREFS);
     return json ? JSON.parse(json) : { artists: {}, genres: {}, playCount: 0, likedSongs: [] };
   } catch {
     return { artists: {}, genres: {}, playCount: 0, likedSongs: [] };
@@ -285,7 +424,7 @@ export async function loadRoamPrefs() {
 
 export async function saveRoamPrefs(prefs) {
   try {
-    await AsyncStorage.setItem(KEYS.ROAM_PREFS, JSON.stringify(prefs));
+    await kvSetAsync(KEYS.ROAM_PREFS, JSON.stringify(prefs));
   } catch (e) {
     console.error('[Storage] saveRoamPrefs error:', e);
   }
@@ -293,7 +432,7 @@ export async function saveRoamPrefs(prefs) {
 
 export async function clearRoamPrefs() {
   try {
-    await AsyncStorage.removeItem(KEYS.ROAM_PREFS);
+    await kvRemoveAsync(KEYS.ROAM_PREFS);
   } catch (e) {
     console.error('[Storage] clearRoamPrefs error:', e);
   }
@@ -305,7 +444,7 @@ export async function clearRoamPrefs() {
 
 export async function loadCustomPlaylists() {
   try {
-    const json = await AsyncStorage.getItem(KEYS.CUSTOM_PLAYLISTS);
+    const json = await kvGetAsync(KEYS.CUSTOM_PLAYLISTS);
     return json ? JSON.parse(json) : [];
   } catch {
     return [];
@@ -314,7 +453,7 @@ export async function loadCustomPlaylists() {
 
 export async function saveCustomPlaylists(playlists) {
   try {
-    await AsyncStorage.setItem(KEYS.CUSTOM_PLAYLISTS, JSON.stringify(playlists));
+    await kvSetAsync(KEYS.CUSTOM_PLAYLISTS, JSON.stringify(playlists));
   } catch (e) {
     console.error('[Storage] saveCustomPlaylists error:', e);
   }
@@ -332,58 +471,53 @@ export function createPlaylistObject(name) {
 }
 
 export function isTrackInPlaylist(playlist, track) {
-  if (!playlist || !playlist.tracks) return false;
-  const id = getFavoriteId(track);
-  const songId = track.songId || track.id;
-  if (songId) {
-    return playlist.tracks.some(t => t.id === id || (t.type === 'online' && (t.songId === songId || t.id === songId)));
-  }
-  return playlist.tracks.some(t => t.id === id || (t.type !== 'online' && t.path === track.path));
+  if (!playlist || !Array.isArray(playlist.tracks) || !track) return false;
+  return isFavorited(track, playlist.tracks);
 }
 
 export function addTrackToPlaylistData(playlist, track) {
-  if (!playlist) return false;
+  if (!playlist || !track) return false;
   if (!playlist.tracks) playlist.tracks = [];
+  invalidateFavoriteLookup(playlist.tracks);
   if (isTrackInPlaylist(playlist, track)) return false;
-  const id = getFavoriteId(track);
-  const trackType = track.type || (track.path && (!track.songId || String(track.songId).startsWith('local_')) ? 'local' : 'online');
+
+  const normalized = normalizeTrack(track);
+  const id = getFavoriteId(normalized);
   playlist.tracks.push({
     id: id,
-    type: trackType,
-    path: track.path || '',
-    name: track.name || '',
-    songId: track.songId || track.id || null,
-    artist: track.artist || '',
-    album: track.album || '',
-    duration: track.duration || 0,
-    fee: track.fee || 0,
-    _src: track._src || null,
-    _platform: track._platform || (trackType === 'online' ? (track._src || 'netease') : undefined),
-    picUrl: track.picUrl || track.pic || track.coverUrl || track.cover || '',
-    pic: track.pic || track.picUrl || track.coverUrl || track.cover || '',
+    type: normalized.type,
+    path: normalized.path || '',
+    name: normalized.name || '',
+    title: normalized.name || '',
+    songId: normalized.songId || null,
+    artist: normalized.artist || '',
+    album: normalized.album || '',
+    duration: normalized.duration || 0,
+    fee: normalized.fee || 0,
+    _src: normalized._src || null,
+    _platform: normalized._platform || undefined,
+    picUrl: normalized.picUrl || '',
+    pic: normalized.picUrl || '',
     addedAt: Date.now(),
   });
+  invalidateFavoriteLookup(playlist.tracks);
   playlist.updatedAt = Date.now();
   return true;
 }
 
 export function removeTrackFromPlaylistData(playlist, trackIdOrSongId) {
   if (!playlist || !playlist.tracks) return;
+  invalidateFavoriteLookup(playlist.tracks);
   const idx = playlist.tracks.findIndex(t => t.id === trackIdOrSongId || t.songId === trackIdOrSongId || t.path === trackIdOrSongId);
   if (idx >= 0) {
     playlist.tracks.splice(idx, 1);
+    invalidateFavoriteLookup(playlist.tracks);
     playlist.updatedAt = Date.now();
   }
 }
 
 /**
  * 智能解析导入数据
- * 支持：
- * 1. type: 'neon-player-playlist' (单歌单)
- * 2. type: 'neon-player-favorites' (旧版我喜欢)
- * 3. type: 'neon-player-backup' (全量备份)
- * 4. 洛雪歌单/通用歌曲数组 [{ name, singer/artist, ... }]
- * 5. 纯文本逐行格式 ("歌名 - 歌手" 或 "歌名")
  */
 export function parseImportData(rawContent, defaultName = '导入歌单') {
   if (!rawContent || typeof rawContent !== 'string') {
@@ -398,38 +532,33 @@ export function parseImportData(rawContent, defaultName = '导入歌单') {
     json = null;
   }
 
-  // 1. JSON 格式解析
   if (json && typeof json === 'object') {
-    // 全量备份
     if (json.type === 'neon-player-backup' || (json.favorites && json.playlists)) {
       return {
         format: 'backup',
-        favorites: Array.isArray(json.favorites) ? json.favorites : [],
+        favorites: Array.isArray(json.favorites) ? json.favorites.map(t => normalizeTrack(t)) : [],
         playlists: Array.isArray(json.playlists) ? json.playlists : [],
       };
     }
 
-    // 单自建歌单
     if (json.type === 'neon-player-playlist' || (json.name && Array.isArray(json.tracks))) {
       return {
         format: 'single-playlist',
         name: json.name || defaultName,
-        tracks: Array.isArray(json.tracks) ? json.tracks : [],
+        tracks: Array.isArray(json.tracks) ? json.tracks.map(t => normalizeTrack(t)) : [],
       };
     }
 
-    // 喜欢清单
     if (json.type === 'neon-player-favorites' || Array.isArray(json.favorites)) {
       return {
         format: 'favorites',
         name: '我喜欢的',
-        tracks: Array.isArray(json.favorites) ? json.favorites : [],
+        tracks: Array.isArray(json.favorites) ? json.favorites.map(t => normalizeTrack(t)) : [],
       };
     }
 
-    // 歌曲数组 (如直接导出的 tracks 数组或第三方歌单数组)
     if (Array.isArray(json)) {
-      const tracks = json.map(item => ({
+      const tracks = json.map(item => normalizeTrack({
         id: item.id || (item.songId ? 'online_' + item.songId : 'online_' + Date.now() + '_' + Math.random().toString(36).slice(2, 5)),
         type: item.type || 'online',
         path: item.path || '',
@@ -441,6 +570,7 @@ export function parseImportData(rawContent, defaultName = '导入歌单') {
         fee: item.fee || 0,
         _src: item._src || 'netease',
         _platform: item._platform || 'netease',
+        picUrl: item.picUrl || item.pic || item.cover || '',
       }));
       return {
         format: 'single-playlist',
@@ -450,7 +580,6 @@ export function parseImportData(rawContent, defaultName = '导入歌单') {
     }
   }
 
-  // 2. 纯文本格式逐行解析 ("歌名 - 歌手" 或 "歌名")
   const lines = content.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
   if (lines.length > 0) {
     const tracks = lines.map((line, idx) => {
@@ -465,7 +594,7 @@ export function parseImportData(rawContent, defaultName = '导入歌单') {
         name = parts[0].trim();
         artist = parts.slice(1).join('-').trim();
       }
-      return {
+      return normalizeTrack({
         id: 'online_txt_' + Date.now() + '_' + idx,
         type: 'online',
         name: name || '未知歌曲',
@@ -475,7 +604,7 @@ export function parseImportData(rawContent, defaultName = '导入歌单') {
         songId: null,
         _src: 'netease',
         _platform: 'netease',
-      };
+      });
     });
     return {
       format: 'single-playlist',
@@ -489,10 +618,11 @@ export function parseImportData(rawContent, defaultName = '导入歌单') {
 
 export default {
   KEYS,
+  kvGetSync, kvGetAsync, kvSetAsync, kvRemoveAsync,
   loadFavorites, saveFavorites,
   getFavoriteId, isFavorited, toggleFavorite,
   loadPlaylist, savePlaylist,
-  loadSettings, saveSettings,
+  getSettingsSync, loadSettings, saveSettings,
   loadVolume, saveVolume,
   getCachedUrl, setCachedUrl, clearUrlCache, restoreUrlCache,
   loadRoamPrefs, saveRoamPrefs, clearRoamPrefs,

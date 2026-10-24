@@ -1,5 +1,5 @@
-// 迷你播放栏 — 对应桌面端 .player-bar
-import React, { useState } from 'react';
+// 迷你播放栏 — 对应桌面端 .player-bar（Phase 4: React.memo 渲染隔离）
+import React, { useState, memo } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Image } from 'react-native';
 import { useTheme } from '../theme/useTheme';
 import { PlayIcon, PauseIcon, NextIcon, HeartIcon, MusicIcon } from './icons';
@@ -28,7 +28,7 @@ function CoverThumb({ uri, bg, iconColor }) {
   );
 }
 
-export default function MiniPlayer({ onPress }) {
+function MiniPlayer({ onPress }) {
   const { colors } = useTheme();
 
   const { playlist, currentIndex, isPlaying, isRoaming, roamIndex, roamPlaylist, favorites, currentCoverUrl } = usePlayerStore();
@@ -93,6 +93,8 @@ export default function MiniPlayer({ onPress }) {
     </TouchableOpacity>
   );
 }
+
+export default memo(MiniPlayer);
 
 const styles = StyleSheet.create({
   container: {

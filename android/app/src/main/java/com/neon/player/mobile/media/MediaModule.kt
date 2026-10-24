@@ -67,6 +67,32 @@ class MediaModule(reactContext: ReactApplicationContext) :
     private var isServiceRunning = false
     private var noisyReceiverRegistered = false
 
+    // === NeonKV: 内存 + SharedPreferences 极速同步键值存储引擎 (类 MMKV 架构) ===
+    private val kvPrefs by lazy {
+        reactApplicationContext.getSharedPreferences("neon_fast_kv", Context.MODE_PRIVATE)
+    }
+    private val kvMemoryCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    @Volatile
+    private var kvHydrated = false
+
+    private fun ensureKvHydrated() {
+        if (kvHydrated) return
+        synchronized(kvMemoryCache) {
+            if (kvHydrated) return
+            try {
+                val all = kvPrefs.all
+                for ((k, v) in all) {
+                    if (v is String) {
+                        kvMemoryCache[k] = v
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w("MediaModule", "NeonKV hydrate error: ${e.message}")
+            }
+            kvHydrated = true
+        }
+    }
+
     private val noisyReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
@@ -454,6 +480,112 @@ class MediaModule(reactContext: ReactApplicationContext) :
         } catch (e: Exception) {
             promise.reject("GET_LOGS_ERROR", e.message)
         }
+    }
+
+    // === NeonKV 极速同步读写接口 (<0.02ms 内存同步读取 + 异步非阻塞落盘) ===
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    fun kvGetString(key: String): String? {
+        ensureKvHydrated()
+        return kvMemoryCache[key]
+    }
+
+    @ReactMethod
+    fun kvSetString(key: String, value: String) {
+        ensureKvHydrated()
+        kvMemoryCache[key] = value
+        try {
+            kvPrefs.edit().putString(key, value).apply()
+        } catch (e: Exception) {
+            Log.w("MediaModule", "kvSetString error: ${e.message}")
+        }
+    }
+
+    @ReactMethod
+    fun kvRemove(key: String) {
+        ensureKvHydrated()
+        kvMemoryCache.remove(key)
+        try {
+            kvPrefs.edit().remove(key).apply()
+        } catch (e: Exception) {
+            Log.w("MediaModule", "kvRemove error: ${e.message}")
+        }
+    }
+
+    // =========================================================================
+    // Phase 3: AndroidX Media3 (ExoPlayer) 原生播放控制桥接
+    // =========================================================================
+
+    @ReactMethod
+    fun exoLoad(
+        uri: String,
+        sessionId: Double,
+        isLooping: Boolean,
+        volume: Double,
+        playWhenReady: Boolean,
+        promise: Promise
+    ) {
+        MediaService.reactContext = reactApplicationContext
+        NativeExoPlayer.loadAndPlay(
+            context = reactApplicationContext,
+            uriString = uri,
+            sessionId = sessionId.toInt(),
+            looping = isLooping,
+            vol = volume.toFloat(),
+            playWhenReady = playWhenReady
+        ) { ok, err ->
+            if (ok) {
+                promise.resolve(true)
+            } else {
+                promise.reject("EXO_LOAD_ERROR", err ?: "exoLoad failed")
+            }
+        }
+    }
+
+    @ReactMethod
+    fun exoPlay(promise: Promise) {
+        MediaService.reactContext = reactApplicationContext
+        NativeExoPlayer.play(reactApplicationContext) { ok, err ->
+            if (ok) promise.resolve(true) else promise.reject("EXO_PLAY_ERROR", err ?: "exoPlay failed")
+        }
+    }
+
+    @ReactMethod
+    fun exoPause(promise: Promise) {
+        NativeExoPlayer.pause { ok, err ->
+            if (ok) promise.resolve(true) else promise.reject("EXO_PAUSE_ERROR", err ?: "exoPause failed")
+        }
+    }
+
+    @ReactMethod
+    fun exoStop(promise: Promise) {
+        NativeExoPlayer.stopAndUnload { ok, err ->
+            if (ok) promise.resolve(true) else promise.reject("EXO_STOP_ERROR", err ?: "exoStop failed")
+        }
+    }
+
+    @ReactMethod
+    fun exoSeek(positionMs: Double, promise: Promise) {
+        NativeExoPlayer.seekTo(positionMs.toLong()) { ok, err ->
+            if (ok) promise.resolve(true) else promise.reject("EXO_SEEK_ERROR", err ?: "exoSeek failed")
+        }
+    }
+
+    @ReactMethod
+    fun exoSetVolume(volume: Double, promise: Promise) {
+        NativeExoPlayer.setVolume(volume.toFloat())
+        promise.resolve(true)
+    }
+
+    @ReactMethod
+    fun exoSetLooping(isLooping: Boolean, promise: Promise) {
+        NativeExoPlayer.setLooping(isLooping)
+        promise.resolve(true)
+    }
+
+    @ReactMethod
+    fun exoSetMixWithOthers(allowMix: Boolean, promise: Promise) {
+        NativeExoPlayer.setAllowMixWithOthers(allowMix)
+        promise.resolve(true)
     }
 
     override fun invalidate() {

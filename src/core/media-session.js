@@ -9,7 +9,7 @@
 // 3. 原生层缓存所有字段，确保通知栏 UI 永远有最新完整状态
 import { NativeModules, NativeEventEmitter } from 'react-native';
 import { EVENTS, on, off, emit } from './event-bus';
-import { loadSettings, saveSettings } from './storage';
+import { loadSettings, saveSettings, isFavorited } from './storage';
 import logger from './logger';
 
 const MediaModule = NativeModules.MediaModule;
@@ -27,8 +27,9 @@ let notifIsPlaying = false;
 let notifPosition = 0;
 let notifIsFavorited = false;
 
-// 收藏列表引用
+// 收藏列表与当前播放曲目引用
 let _favorites = [];
+let _currentTrack = null;
 
 // 是否有更新待推送
 let pendingFlush = false;
@@ -101,21 +102,17 @@ function setPlaybackState(isPlaying, positionSec) {
 
 function setFavoriteState(favorited) {
   notifIsFavorited = !!favorited;
-  // 喜欢状态变化必须立即同步
+  // 喜欢状态变化必须立即同步，清理防抖定时器
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
   flushToNative();
 }
 
 function isFavoritedTrack(track) {
   if (!track) return false;
-  // 在线曲目：用 songId/id 匹配
-  if (track.type === 'online' || (track.songId && !String(track.songId).startsWith('local_'))) {
-    const id = track.songId || track.id;
-    if (id) {
-      return _favorites.some(f => f.type === 'online' && f.songId === id);
-    }
-  }
-  // 本地曲目：用 path 匹配
-  return _favorites.some(f => f.type !== 'online' && f.path === track.path);
+  return isFavorited(track, _favorites);
 }
 
 // =====================================================================
@@ -203,7 +200,11 @@ export function stopMediaNotification() {
 }
 
 export function setFavoritesRef(favs) {
-  _favorites = favs;
+  _favorites = favs || [];
+  if (_currentTrack && initialized) {
+    const favorited = isFavoritedTrack(_currentTrack);
+    setFavoriteState(favorited);
+  }
 }
 
 // =====================================================================
@@ -229,6 +230,7 @@ function subscribeToEvents() {
   unsubTrackChange = on(EVENTS.PLAYBACK_TRACK_CHANGE, (data) => {
     const { track, isPlaying } = data;
     if (!track) return;
+    _currentTrack = track;
 
     // 先更新所有缓存变量，最后只调一次 flushToNative
     // 避免多次 flushToNative 在后台被 RN bridge throttle 导致中间状态生效

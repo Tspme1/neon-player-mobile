@@ -4,6 +4,37 @@
 
 ---
 
+## [1.00.019] - 2026-10-24
+
+### 🏗️ 全栈现代化架构重构 (Phase 1 ~ Phase 4)
+- **Phase 1：数据源解耦与 Provider 插件化架构**：
+  - 将原单体巨型文件 `source-manager.js` 拆分为契约模型层（`models/track.js`）、统一重试与缓存请求层（`http/http-client.js`）、独立平台实现层（`providers/{netease,tencent,kuwo,kugou,migu,lx}-provider.js`）与多梯队级联调度器（`resolver/cascade-resolver.js`）；
+  - 统一抽离跨屏下载用例服务 `usecases/download-service.js`，并在原生 `UpdaterModule.kt` 新增 `copyLocalFile` 零拷贝接口，本地已缓存曲目导出至系统下载目录实现 0 秒瞬时完成，消除重复流式下载与双份 UI 胶水代码。
+- **Phase 2：原生同步 KV 存储与 Zustand 领域分片**：
+  - 原生 `MediaModule.kt` 新增基于内存热缓存 + `SharedPreferences.apply()` 的同步读写接口 `NeonKV`（`kvGetSync` / `kvSetSync` / `kvRemoveSync`）；
+  - `storage.js` 引入基于 `WeakMap` 的 $O(1)$ 哈希索引表，`isFavorited` 在万级曲库下查找复杂度由 $O(N \times M)$ 降至 $O(1)$；
+  - 将全局状态库按领域拆分为 `playerSlice`、`queueSlice`、`librarySlice`、`settingsSlice`、`uiSlice`，并新增原子化队列操作 `insertNextInQueue` 与 `removeFromQueue`，根治切歌与队列编辑时的状态撕裂。
+- **Phase 3：AndroidX Media3 (ExoPlayer 1.4.1) 原生音频引擎**：
+  - 集成 Google 官方最新 `androidx.media3:media3-exoplayer:1.4.1` 与 `media3-datasource-okhttp:1.4.1`；
+  - 构建原生单例引擎 `NativeExoPlayer.kt` 与 JS 桥接适配器 `media3-sound.js`，具备 `WAKE_MODE_NETWORK` 锁屏抗休眠保活、800ms 极速起播缓冲策略、原生级无缝单曲循环、音频焦点自动闪避以及耳机拔出瞬时静音保护；
+  - 实时同步播放进度至 `MediaService` 并在 `18088` 诊断接口输出完整的 Media3 遥测快照。
+- **Phase 4：UI 渲染隔离与大列表虚拟化优化**：
+  - 独立拆出歌词高频状态库 `useLyricsStore`，仅当全屏播放器展开时订阅歌词行高亮变化，彻底消除收起状态下每秒数次的全应用重渲染；
+  - 为 `TrackItem`（配合自定义浅比较器 `areTrackPropsEqual`）与 `MiniPlayer` 注入 `React.memo` 渲染屏障；
+  - 统一全应用五大核心列表（本地、在线、收藏、发现、队列）的 `FlatList` 虚拟化窗口参数（`TRACK_LIST_PERF_PROPS`），大幅降低长列表滑动掉帧与内存占用。
+
+### 🐞 核心缺陷修复
+- **通知栏与 APP 内“喜欢”状态双向实时同步**：
+  - 修复在 APP 内点击喜欢/取消喜欢后，下拉通知栏爱心图标未同步变化的历史遗留问题；
+  - `media-session.js` 的 `setFavoritesRef` 接入统一 $O(1)$ 索引并在收藏列表变更时立即重算当前曲目状态、清理防抖定时器并推送到原生层；
+  - 原生 `MediaService.kt` 的 `PlaybackStateCompat` 同步注册 `CustomAction`（动态切换 `ic_heart_filled` / `ic_heart_outline`）并响应 `onCustomAction`，全面兼容 Android 11+ 及 vivo OriginOS 系统媒体控制中心。
+- **网易云音乐 `fee === 8` 曲目误判 VIP 修复**：
+  - 修正网易云音源对 `fee === 8`（普通免费试听、仅高音质需会员）曲目的权限判定，仅对 `fee === 1`（VIP 专享）与 `fee === 4`（付费数字专辑）标记限制，恢复普通免费歌曲正常播放。
+- **自定义 LX 音源直链解析导出补齐**：
+  - 补齐 `lx-provider.js` 中 `resolveLxPlayUrl` 的实现与导出，确保自定义音源脚本与级联调度器无缝协同。
+
+---
+
 ## [1.00.018] - 2026-09-18
 
 ### 🚀 音源调度与网络波动自愈

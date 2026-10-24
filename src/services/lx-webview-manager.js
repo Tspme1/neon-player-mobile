@@ -3,12 +3,13 @@
 // 解决 Hermes 不支持 new Function() 的问题
 //
 // 架构:
-//   RN 端: 管理 WebView ref、fetch 代理、超时控制
+//   RN 端: 管理 WebView ref、fetch 代理（优先走原生 OkHttp）、超时控制
 //   WebView: 执行音源脚本、调用 handler
 //   通信: injectJavaScript (RN→WebView) + postMessage (WebView→RN)
 
+import { NativeModules } from 'react-native';
 import { SANDBOX_HTML } from './lx-webview-sandbox';
-import { loadRegistry, readSourceCode } from '../core/source-manager';
+import { loadRegistry, readSourceCode } from '../core/providers/lx-provider';
 import { patchAntiDebug } from './anti-debug-patch';
 import CryptoJS from 'crypto-js';
 
@@ -94,7 +95,7 @@ export function handleWebViewMessage(event) {
   let data;
   try {
     data = JSON.parse(event.nativeEvent.data);
-  } catch(e) {
+  } catch (e) {
     return;
   }
 
@@ -133,13 +134,14 @@ export function handleWebViewMessage(event) {
       _handleFetchRequest(data);
       break;
 
-    case 'request_result':
+    case 'request_result': {
       const cb = _requestCallbacks[data.reqId];
       if (cb) {
         cb(data.result);
         delete _requestCallbacks[data.reqId];
       }
       break;
+    }
 
     case 'cryptojs_missing':
       _injectCryptoJS();
@@ -153,13 +155,14 @@ export function handleWebViewMessage(event) {
 // ====== 处理 WebView 发来的 fetch 请求 ======
 async function _handleFetchRequest(data) {
   const { reqId, url, method, headers, body } = data;
+  const mergedHeaders = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    ...headers,
+  };
   try {
     const opts = {
-      method: method,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        ...headers,
-      },
+      method: method || 'GET',
+      headers: mergedHeaders,
     };
     if (body) opts.body = body;
     const res = await fetch(url, opts);
@@ -173,6 +176,17 @@ async function _handleFetchRequest(data) {
     const script = `window._lxFetchResult('${reqId}', null, '${escapedBody}', ${status}, ${headersJson});`;
     _webViewRef?.injectJavaScript(script);
   } catch (err) {
+    // 后台 JS fetch 失败时，回退至原生 OkHttp 兜底
+    const upperMethod = (method || 'GET').toUpperCase();
+    if (upperMethod === 'GET' && !body && NativeModules.MediaModule?.nativeHttpGet) {
+      try {
+        const text = await NativeModules.MediaModule.nativeHttpGet(url, JSON.stringify(mergedHeaders));
+        const escapedBody = (text || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r?\n/g, '\\n');
+        const script = `window._lxFetchResult('${reqId}', null, '${escapedBody}', 200, {});`;
+        _webViewRef?.injectJavaScript(script);
+        return;
+      } catch {}
+    }
     const errMsg = (err.message || String(err)).replace(/'/g, "\\'");
     const script = `window._lxFetchResult('${reqId}', '${errMsg}', null, 500, {});`;
     _webViewRef?.injectJavaScript(script);
@@ -235,7 +249,6 @@ export async function getLxMusicUrlWebView(sourceId, songId, quality = '128k', p
   const _t0 = Date.now();
   const _log = (label) => console.log(`[DBG] +${Date.now() - _t0}ms [webview] ${label}`);
   _log(`start: sourceId=${sourceId} songId=${songId} quality=${quality} platform=${platform}`);
-  // 确保初始化
   if (_currentSourceId !== sourceId || !_inited) {
     _log('initLxSource needed');
     const ok = await initLxSource(sourceId);
@@ -243,7 +256,6 @@ export async function getLxMusicUrlWebView(sourceId, songId, quality = '128k', p
     if (!ok) return null;
   }
 
-  // LX 音源协议 source 标识符映射
   const lxSourceMap = {
     netease: 'wy',
     tencent: 'tx',
@@ -299,9 +311,7 @@ export async function getLxMusicUrlWebView(sourceId, songId, quality = '128k', p
 function isLrcContent(str) {
   if (!str || typeof str !== 'string') return false;
   const trimmed = str.trim();
-  // 排除错误返回的音频直链、JSON 错误串或空文本
   if (/^https?:\/\//i.test(trimmed)) return false;
-  // 必须包含 LRC 规范的时间标签 [mm:ss
   if (!/\[\d{1,2}:\d{2}/.test(trimmed)) return false;
   return true;
 }
@@ -311,7 +321,6 @@ export async function getLxLyricWebView(sourceId, song, platform = 'netease') {
   if (!song) return null;
   const songId = song.songId || song.id || song.songmid || song.hash || '';
 
-  // 确保初始化
   if (_currentSourceId !== sourceId || !_inited) {
     const ok = await initLxSource(sourceId);
     if (!ok) return null;
@@ -326,14 +335,12 @@ export async function getLxLyricWebView(sourceId, song, platform = 'netease') {
   };
   const lxSource = lxSourceMap[platform] || 'wy';
 
-  // 检查音源配置是否声明支持 lyric
   try {
     const entries = await loadRegistry();
     const entry = entries.find(e => e.id === sourceId);
     if (entry && entry.sources && entry.sources[lxSource]) {
       const actions = entry.sources[lxSource].actions || [];
       if (actions.length > 0 && !actions.includes('lyric')) {
-        // 音源明确未声明支持 lyric，直接返回 null，避免其把 lyric 当成 musicUrl 执行
         return null;
       }
     }

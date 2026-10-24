@@ -9,7 +9,7 @@ export function formatTime(seconds) {
 
 export function vipBadge(fee) {
   if (fee === 1) return 'VIP';
-  if (fee === 8) return '专辑';
+  if (fee === 4) return '专辑';
   return null;
 }
 

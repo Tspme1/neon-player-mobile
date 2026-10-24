@@ -19,7 +19,6 @@ import Toast from './src/components/Toast';
 import LxSandbox from './src/components/LxSandbox';
 import UpdateDialog from './src/components/UpdateDialog';
 import AddToPlaylistModal from './src/components/AddToPlaylistModal';
-import { WebViewFetcher } from './src/components/WebViewFetcher';
 
 import { MusicIcon, SearchIcon, HeartIcon, CompassIcon, ListIcon } from './src/components/icons';
 import { tabBarHeight } from './src/theme/spacing';
@@ -45,7 +44,7 @@ export default function App() {
   const [bottomInset] = useState(0);
   const lastBackPressed = useRef(0);
 
-  const { settingsVisible, showToast, toastMessage, pendingUpdateInfo, currentIndex, playlist, isRoaming, roamIndex, roamPlaylist } = usePlayerStore();
+  const { settingsVisible, showToast, toastMessage, toastAction, pendingUpdateInfo, currentIndex, playlist, isRoaming, roamIndex, roamPlaylist } = usePlayerStore();
 
   // MiniPlayer 是否显示（有当前曲目时才显示）
   const hasTrack = (isRoaming && roamIndex >= 0 && roamIndex < roamPlaylist.length) ||
@@ -157,7 +156,7 @@ export default function App() {
 
   const handleToastDismiss = () => {
     setToastVisible(false);
-    usePlayerStore.setState({ showToast: false });
+    usePlayerStore.setState({ showToast: false, toastAction: null });
   };
 
   // === 更新弹窗 ===
@@ -220,9 +219,8 @@ export default function App() {
           }}
         />
 
-        <Toast message={toastMsg} visible={toastVisible} onDismiss={handleToastDismiss} />
+        <Toast message={toastMsg} visible={toastVisible} onDismiss={handleToastDismiss} action={toastAction} />
         <LxSandbox />
-        <WebViewFetcher />
 
         <UpdateDialog
           visible={updateDialogVisible}

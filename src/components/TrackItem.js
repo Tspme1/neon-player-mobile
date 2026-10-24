@@ -1,11 +1,11 @@
-// 歌曲列表项 — 对应桌面端 .track-item
-import React from 'react';
+// 歌曲列表项 — 对应桌面端 .track-item（Phase 4: React.memo O(1) 渲染隔离优化）
+import React, { memo } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { useTheme } from '../theme/useTheme';
 import { HeartIcon } from './icons';
 import { vipBadge, formatTime } from '../utils/format';
 
-export default function TrackItem({
+function TrackItem({
   index,
   name,
   artist,
@@ -84,6 +84,23 @@ export default function TrackItem({
     </TouchableOpacity>
   );
 }
+
+function areTrackPropsEqual(prev, next) {
+  return (
+    prev.index === next.index &&
+    prev.name === next.name &&
+    prev.artist === next.artist &&
+    prev.duration === next.duration &&
+    prev.fee === next.fee &&
+    prev.isPlaying === next.isPlaying &&
+    prev.isFavorited === next.isFavorited &&
+    prev.isOnline === next.isOnline &&
+    prev.rankIcon === next.rankIcon &&
+    prev.showDelete === next.showDelete
+  );
+}
+
+export default memo(TrackItem, areTrackPropsEqual);
 
 const styles = StyleSheet.create({
   container: {

@@ -6,6 +6,7 @@ import { HEADER_PADDING_TOP } from '../theme/safearea';
 import { useTheme } from '../theme/useTheme';
 import { usePlayerStore } from '../store/useStore';
 import { isFavorited, toggleFavorite } from '../core/storage';
+import { TRACK_LIST_PERF_PROPS } from '../utils/list-perf';
 import TrackItem from '../components/TrackItem';
 import EmptyState from '../components/EmptyState';
 import ContextMenu from '../components/ContextMenu';
@@ -36,40 +37,23 @@ export default function QueueScreen() {
   };
 
   const handleFav = (track) => {
-    const newFavs = toggleFavorite(track, [...favorites]);
+    const curFavs = usePlayerStore.getState().favorites;
+    const newFavs = toggleFavorite(track, [...curFavs]);
     setFavorites(newFavs);
-    setToast(isFavorited(track, favorites) ? '已从我喜欢移除' : '已加入我喜欢');
+    setToast(isFavorited(track, newFavs) ? '已加入我喜欢' : '已从我喜欢移除');
   };
 
   const handleRemove = (index) => {
-    const { playlist, currentIndex } = usePlayerStore.getState();
-    const newPlaylist = [...playlist];
-    newPlaylist.splice(index, 1);
-    let newCurrentIndex = currentIndex;
-    if (index === currentIndex) {
-      newCurrentIndex = -1;
-      usePlayerStore.getState().cleanup();
-      usePlayerStore.setState({ isPlaying: false, currentOnlineSong: null, lyricsData: [] });
-    } else if (index < currentIndex) {
-      newCurrentIndex--;
-    }
-    usePlayerStore.setState({ playlist: newPlaylist, currentIndex: newCurrentIndex });
+    usePlayerStore.getState().removeFromQueue(index);
+    setToast('已从播放列表移除');
     setMenuVisible(false);
   };
 
   const handlePlayNext = (index) => {
     const track = isRoaming ? roamPlaylist[index] : playlist[index];
-    if (!track) return;
-    const { playlist: pl, currentIndex: ci } = usePlayerStore.getState();
-    const newPlaylist = [...pl];
-    const insertAt = ci + 1;
-    const trackId = track.songId || track.path || track.id;
-    if (!newPlaylist.some(t => (t.songId || t.path || t.id) === trackId)) {
-      newPlaylist.splice(insertAt, 0, { ...track });
-      usePlayerStore.setState({ playlist: newPlaylist });
-      setToast('已添加到下一首播放');
-    } else {
-      setToast('该曲目已在播放列表中');
+    if (track) {
+      usePlayerStore.getState().insertNextInQueue(track);
+      setToast('已移至下一首播放');
     }
     setMenuVisible(false);
   };
@@ -125,6 +109,7 @@ export default function QueueScreen() {
           renderItem={renderItem}
           keyExtractor={(item, index) => `${item.path || item.id || 'q'}_${index}`}
           contentContainerStyle={{ paddingBottom: 80 }}
+          {...TRACK_LIST_PERF_PROPS}
         />
       )}
       <ContextMenu

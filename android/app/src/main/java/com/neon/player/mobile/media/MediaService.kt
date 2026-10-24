@@ -131,6 +131,11 @@ class MediaService : Service() {
         override fun onSeekTo(pos: Long) {
             sendControlEvent("seek:$pos")
         }
+        override fun onCustomAction(action: String?, extras: android.os.Bundle?) {
+            if (action == ACTION_FAVORITE) {
+                sendControlEvent("favorite")
+            }
+        }
     }
 
     override fun onCreate() {
@@ -282,6 +287,8 @@ class MediaService : Service() {
         )
 
         val state = if (currentIsPlaying) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED
+        val favoriteIcon = if (currentIsFavorited) R.drawable.ic_heart_filled else R.drawable.ic_heart_outline
+        val favoriteLabel = if (currentIsFavorited) "取消喜欢" else "喜欢"
         ms.setPlaybackState(
             PlaybackStateCompat.Builder()
                 .setActions(
@@ -292,6 +299,13 @@ class MediaService : Service() {
                     PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
                     PlaybackStateCompat.ACTION_STOP or
                     PlaybackStateCompat.ACTION_SEEK_TO
+                )
+                .addCustomAction(
+                    PlaybackStateCompat.CustomAction.Builder(
+                        ACTION_FAVORITE,
+                        favoriteLabel,
+                        favoriteIcon
+                    ).build()
                 )
                 .setState(state, currentPosition * 1000, 1.0f)
                 .build()
@@ -474,9 +488,13 @@ object LogServer {
                 val parts = requestLine.split(" ")
                 val uri = if (parts.size > 1) parts[1] else "/"
 
+                val verName = try {
+                    context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "1.00.019"
+                } catch (e: Exception) { "1.00.019" }
+
                 val (statusCode, contentType, bodyBytes) = when {
                     uri.startsWith("/ping") -> {
-                        val json = "{\"status\":\"ok\",\"app\":\"NeonPlayer\",\"version\":\"1.00.017\",\"timestamp\":${System.currentTimeMillis()}}"
+                        val json = "{\"status\":\"ok\",\"app\":\"NeonPlayer\",\"version\":\"$verName\",\"timestamp\":${System.currentTimeMillis()}}"
                         Triple("200 OK", "application/json; charset=utf-8", json.toByteArray(Charsets.UTF_8))
                     }
                     uri.startsWith("/logs/today") -> {
@@ -529,21 +547,22 @@ object LogServer {
                         val svc = MediaService.instance
                         val statusObj = org.json.JSONObject().apply {
                             put("app", "Neon Player")
-                            put("version", "1.00.017")
+                            put("version", verName)
                             put("title", svc?.currentTitle ?: "")
                             put("artist", svc?.currentArtist ?: "")
-                            put("isPlaying", svc?.currentIsPlaying ?: false)
-                            put("duration", svc?.currentDuration ?: 0L)
-                            put("position", svc?.currentPosition ?: 0L)
+                            put("isPlaying", svc?.currentIsPlaying ?: NativeExoPlayer.snapIsPlaying)
+                            put("duration", svc?.currentDuration ?: NativeExoPlayer.snapDurationMs)
+                            put("position", svc?.currentPosition ?: NativeExoPlayer.snapPositionMs)
                             put("isFavorited", svc?.currentIsFavorited ?: false)
                             put("bufferedLogLines", MediaModule.getNativeLogs(1000).size)
+                            put("media3", NativeExoPlayer.getDiagnosticsJson())
                         }
                         Triple("200 OK", "application/json; charset=utf-8", statusObj.toString(2).toByteArray(Charsets.UTF_8))
                     }
                     else -> {
                         val help = """
 ===================================================
-Neon Player Mobile v1.00.017 Diagnostic API
+Neon Player Mobile v$verName Diagnostic API
 ===================================================
 Available Endpoints:
   GET /logs         - Retrieve recent logs (?limit=200)

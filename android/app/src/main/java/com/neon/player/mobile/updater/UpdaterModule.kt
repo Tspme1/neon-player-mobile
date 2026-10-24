@@ -223,13 +223,78 @@ class UpdaterModule(reactContext: ReactApplicationContext) :
             ?.emit("updateDownloadProgress", progress)
     }
 
+    private fun saveStreamToMusicDir(input: java.io.InputStream, fileName: String): String {
+        val safeName = fileName.replace('/', '_').replace('\\', '_').replace(':', '_').replace('*', '_').replace('?', '_').replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_').take(100)
+        val resolver = reactApplicationContext.contentResolver
+        val contentValues = android.content.ContentValues().apply {
+            put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, safeName)
+            put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "audio/mpeg")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS + "/NeonPlayer")
+                put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+        }
+
+        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            android.provider.MediaStore.Downloads.getContentUri(android.provider.MediaStore.VOLUME_EXTERNAL)
+        } else {
+            android.provider.MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+        }
+
+        val itemUri = resolver.insert(collection, contentValues)
+            ?: throw Exception("Cannot create MediaStore entry")
+
+        val output = resolver.openOutputStream(itemUri)
+        if (output == null) {
+            resolver.delete(itemUri, null, null)
+            throw Exception("Cannot open output stream")
+        }
+
+        input.use { inStream ->
+            output.use { outStream ->
+                inStream.copyTo(outStream)
+                outStream.flush()
+            }
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val updateValues = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
+            }
+            resolver.update(itemUri, updateValues, null, null)
+        }
+
+        Log.d("UpdaterModule", "[saveStreamToMusicDir] saved to: $itemUri")
+        return safeName
+    }
+
     @ReactMethod
     fun downloadToMusicDir(url: String, fileName: String, promise: Promise) {
         try {
+            // 极速直拷通道：如果传入的是本地文件或缓存文件路径，直接 0 流量流式拷贝至 Download/NeonPlayer
+            if (url.startsWith("file://") || url.startsWith("/")) {
+                Thread {
+                    try {
+                        val cleanPath = if (url.startsWith("file://")) url.substring(7) else url
+                        val localFile = File(cleanPath)
+                        if (!localFile.exists() || localFile.length() <= 0L) {
+                            promise.reject("DOWNLOAD_ERROR", "Local cache file not found: $cleanPath")
+                            return@Thread
+                        }
+                        val savedName = saveStreamToMusicDir(localFile.inputStream(), fileName)
+                        promise.resolve(savedName)
+                    } catch (e: Exception) {
+                        Log.e("UpdaterModule", "[downloadToMusicDir:local] error: ${e.message}")
+                        promise.reject("DOWNLOAD_ERROR", e.message)
+                    }
+                }.start()
+                return
+            }
+
             val downloadClient = OkHttpClient.Builder()
                 .connectTimeout(15, TimeUnit.SECONDS)
                 .readTimeout(300, TimeUnit.SECONDS)
-                .retryOnConnectionFailure(false)
+                .retryOnConnectionFailure(true)
                 .build()
             val request = Request.Builder()
                 .url(url)
@@ -247,61 +312,13 @@ class UpdaterModule(reactContext: ReactApplicationContext) :
                             promise.reject("DOWNLOAD_ERROR", "HTTP " + response.code)
                             return
                         }
-                        val safeName = fileName.replace('/', '_').replace('\\', '_').replace(':', '_').replace('*', '_').replace('?', '_').replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_').take(100)
-                        if (!safeName.endsWith(".mp3")) {
-                            // 确保有扩展名
-                        }
-                        
-                        val resolver = reactApplicationContext.contentResolver
-                        val contentValues = android.content.ContentValues().apply {
-                            put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, safeName)
-                            put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "audio/mpeg")
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                                put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS + "/NeonPlayer")
-                                put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
-                            }
-                        }
-                        
-                        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                            android.provider.MediaStore.Downloads.getContentUri(android.provider.MediaStore.VOLUME_EXTERNAL)
-                        } else {
-                            android.provider.MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-                        }
-                        
-                        val itemUri = resolver.insert(collection, contentValues)
-                        if (itemUri == null) {
-                            promise.reject("DOWNLOAD_ERROR", "Cannot create MediaStore entry")
-                            return
-                        }
-                        
                         val input = response.body?.byteStream()
                         if (input == null) {
-                            resolver.delete(itemUri, null, null)
                             promise.reject("DOWNLOAD_ERROR", "Empty response body")
                             return
                         }
-                        
-                        val output = resolver.openOutputStream(itemUri)
-                        if (output == null) {
-                            resolver.delete(itemUri, null, null)
-                            promise.reject("DOWNLOAD_ERROR", "Cannot open output stream")
-                            return
-                        }
-                        
-                        input.copyTo(output)
-                        output.flush()
-                        output.close()
-                        input.close()
-                        
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                            val updateValues = android.content.ContentValues().apply {
-                                put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
-                            }
-                            resolver.update(itemUri, updateValues, null, null)
-                        }
-                        
-                        Log.d("UpdaterModule", "[downloadToMusicDir] saved to: $itemUri")
-                        promise.resolve(safeName)
+                        val savedName = saveStreamToMusicDir(input, fileName)
+                        promise.resolve(savedName)
                     } catch (e: Exception) {
                         Log.d("UpdaterModule", "[downloadToMusicDir] error: ${e.message}")
                         promise.reject("DOWNLOAD_ERROR", e.message)
